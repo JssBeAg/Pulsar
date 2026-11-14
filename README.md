@@ -27,7 +27,11 @@ Proyecto para **NASA Space Apps Challenge 2026** (14 de noviembre de 2026).
 
 ## 1. El problema
 
+<<<<<<< HEAD
 En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta cambia: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Los riesgos principales son: holahola
+=======
+En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta presenta cambios constantes en distintas partes del cuerpo: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Pero ademas de eso los riesgos principales son:
+>>>>>>> 08cc586bf45668755f4f6f1c5456181f9b1d7b9c
 
 - **Radiación**
 - **Aislamiento y confinamiento**
