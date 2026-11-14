@@ -27,11 +27,7 @@ Proyecto para **NASA Space Apps Challenge 2026** (14 de noviembre de 2026).
 
 ## 1. El problema
 
-<<<<<<< HEAD
-En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta cambia: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Los riesgos principales son: holaholaaaaaaaa pousito 127
-=======
-En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta presenta cambios constantes en distintas partes del cuerpo: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Pero ademas de eso los riesgos principales son:
->>>>>>> 08cc586bf45668755f4f6f1c5456181f9b1d7b9c
+En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta presenta cambios constantes en distintas partes del cuerpo: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Pero además de eso los riesgos principales son:
 
 - **Radiación**
 - **Aislamiento y confinamiento**
@@ -174,12 +170,30 @@ Cada pieza existe porque resuelve un problema de la anterior:
 ```
 pulsar/
 ├── firmware/
-│   ├── sensor/            # ESP32 del astronauta (PlatformIO)
-│   └── access-point/      # ESP32 que hace de red de la nave (PlatformIO)
-├── backend/               # ingestor.py, reglas, SQLite
-├── dashboard/             # app de Streamlit
-├── broker/                # mosquitto.conf
-├── docs/                  # arquitectura, diagramas, pitch
+│   ├── sensor/                  # ESP32 del astronauta (PlatformIO)
+│   │   ├── platformio.ini
+│   │   └── src/
+│   │       ├── main.cpp         # Orquesta todo con millis(), sin delay
+│   │       ├── config.h         # WiFi, MQTT, pines e intervalos
+│   │       ├── lectura.*        # Leer variables (único archivo a cambiar con sensores reales)
+│   │       ├── reglas.*         # Número → semáforo + motivo + acción
+│   │       ├── pantalla.*       # OLED: estado, acción y gráfica del pulso
+│   │       ├── registro.*       # CSV en LittleFS, escrito cada 30 s
+│   │       └── red.*            # WiFi + MQTT sin bloqueo
+│   └── access-point/            # ESP32 que hace de red de la nave (PlatformIO)
+├── backend/
+│   ├── config.py                # Broker, tópicos, ruta de la base
+│   ├── db.py                    # Tablas y funciones para guardar
+│   ├── reglas.py                # Mismas reglas que el firmware, en Python
+│   └── ingestor.py              # MQTT → SQLite (único que escribe lecturas)
+├── dashboard/
+│   └── app.py                   # Streamlit: lee SQLite, semáforo, gráficas y check-in
+├── broker/
+│   └── mosquitto.conf
+├── data/                        # Aquí se crea pulsar.db (no se sube a Git)
+├── docs/
+│   ├── arquitectura.md          # Resumen de arquitectura y decisiones
+│   └── reglas.md                # Umbrales: fuente de verdad
 ├── docker-compose.yml
 ├── requirements.txt
 ├── .gitignore
@@ -196,7 +210,9 @@ __pycache__/
 
 ## 8. Cómo correrlo
 
-> Algunas carpetas todavía están en construcción. Esta sección se actualiza conforme cada parte funcione.
+> El código base de todas las partes ya existe, pero **todavía no se ha probado en el hardware**. Esta sección se actualiza conforme cada parte funcione.
+>
+> Todos los comandos se corren desde la **raíz del proyecto**.
 
 ### 8.1 Preparar Python (con internet, antes de conectarse al access point)
 ```powershell
@@ -258,21 +274,37 @@ Conexiones:
 
 | Componente | Pin del ESP32 |
 |---|---|
-| Potenciómetros (pata central) | GPIO 32, 33, 34, 35, 36, 39 (**solo ADC1**) |
+| Potenciómetro de pulso (pata central) | GPIO 34 |
+| Potenciómetro de SpO₂ (pata central) | GPIO 35 |
+| Potenciómetro de temperatura (pata central) | GPIO 32 |
+| Potenciómetro de CO₂ (pata central) | GPIO 33 |
+| Potenciómetro de radiación (pata central) | GPIO 36 |
 | Potenciómetros (extremos) | 3.3V y GND |
 | OLED SDA / SCL | GPIO 21 / GPIO 22 |
+| OLED VCC / GND | 3.3V / GND |
 
-> Usamos solo pines ADC1 porque **ADC2 no funciona con el WiFi encendido**.
+> Usamos solo pines ADC1 porque **ADC2 no funciona con el WiFi encendido**. GPIO 39 queda libre para otro sensor.
 
-Sube el firmware y abre el monitor serial (115200).
+Los pines, la red WiFi, la IP del broker y los intervalos se cambian en `firmware/sensor/src/config.h`.
+
+Sube el firmware y abre el monitor serial (115200). Cada segundo imprime las lecturas, el sistema que manda en la pantalla y si hay conexión MQTT (`mqtt=si/no`).
+
+En la pantalla se ve:
+- arriba y en grande, el **estado general** (el peor nivel de todos los sistemas);
+- debajo, la **acción recomendada**;
+- abajo, el pulso actual y una **gráfica de los últimos 100 segundos**.
+
+El registro local queda en `/registro.csv` dentro de la flash (columnas `ts,pulso,spo2,temp,co2,rad`, donde `ts` = segundos desde que arrancó el ESP32). Se escribe cada 30 s; si pasa de ~1 MB se borra y empieza de nuevo para no llenar la memoria.
 
 ### 8.5 Backend y dashboard
 ```powershell
 python backend/ingestor.py
 streamlit run dashboard/app.py --server.address 0.0.0.0
 ```
+- El ingestor crea `data/pulsar.db` la primera vez y reintenta solo si el broker todavía no está arriba.
 - En la laptop: `http://localhost:8501`
 - Desde otra PC en la misma red: `http://192.168.4.10:8501`
+- El dashboard se refresca cada 2 s. Si no llegan datos en 10 s, muestra un aviso de posible pérdida de comunicación.
 
 ## 9. Contrato de datos (MQTT)
 
@@ -299,6 +331,8 @@ Este es el "idioma" acordado entre el firmware y el backend. **Si lo cambias, av
 ## 10. Reglas de salud
 
 > ⚠️ Valores **de demostración**, no son criterios médicos.
+>
+> La **fuente de verdad** es [`docs/reglas.md`](docs/reglas.md) (incluye cómo se resuelven los valores justo en el límite y los textos de cada acción). Si cambias un umbral, cámbialo también en `firmware/sensor/src/reglas.cpp` y `backend/reglas.py`.
 
 | Sistema | Variable | Verde | Amarillo | Rojo |
 |---|---|---|---|---|
@@ -332,6 +366,8 @@ Rangos que simula cada potenciómetro: pulso 40–180 bpm, SpO₂ 85–100 %, te
 - Sensores reales, tarjeta SD, varios astronautas e interfaz más pulida.
 
 ## 12. Estado y prioridades
+
+El código base de los puntos 1 a 6 ya está escrito; se marcan cuando funcionen en el hardware. Pendientes conocidos: regla de radiación (falta definir el límite diario), línea base personal y recomendaciones a partir del check-in.
 
 En orden:
 
