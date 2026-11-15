@@ -1,200 +1,213 @@
 # Pulsar 🛰️
 
-**Monitoreo de salud para astronautas en misiones de larga duración que funciona aunque no haya comunicación con la Tierra.**
+**Health monitoring for astronauts on long-duration missions that keeps working even without communication with Earth.**
 
-Proyecto para **NASA Space Apps Challenge 2026** (14 de noviembre de 2026).
-
----
-
-## Índice
-
-1. [El problema](#1-el-problema)
-2. [Nuestra solución](#2-nuestra-solución)
-3. [Arquitectura](#3-arquitectura)
-4. [Por qué lo diseñamos así](#4-por-qué-lo-diseñamos-así)
-5. [Herramientas](#5-herramientas)
-6. [Requerimientos](#6-requerimientos)
-7. [Estructura del repositorio](#7-estructura-del-repositorio)
-8. [Cómo correrlo](#8-cómo-correrlo)
-9. [Contrato de datos (MQTT)](#9-contrato-de-datos-mqtt)
-10. [Reglas de salud](#10-reglas-de-salud)
-11. [El demo](#11-el-demo)
-12. [Estado y prioridades](#12-estado-y-prioridades)
-13. [Cómo trabajamos con Git](#13-cómo-trabajamos-con-git)
-14. [Glosario](#14-glosario)
+Project for the **NASA Space Apps Challenge 2026** (November 14, 2026).
 
 ---
 
-## 1. El problema
+## Contents
 
-En una misión larga (por ejemplo, a Marte) el cuerpo del astronauta presenta cambios constantes en distintas partes del cuerpo: el corazón, los huesos, el sistema inmune, el sueño y el estado de ánimo. Pero además de eso los riesgos principales son:
+1. [The problem](#1-the-problem)
+2. [Our solution](#2-our-solution)
+3. [Architecture](#3-architecture)
+4. [Why we designed it this way](#4-why-we-designed-it-this-way)
+5. [Tools](#5-tools)
+6. [Requirements](#6-requirements)
+7. [Repository structure](#7-repository-structure)
+8. [How to run it](#8-how-to-run-it)
+9. [Data contract (MQTT)](#9-data-contract-mqtt)
+10. [Health rules](#10-health-rules)
+11. [The demo](#11-the-demo)
+12. [Status and priorities](#12-status-and-priorities)
+13. [How we work with Git](#13-how-we-work-with-git)
+14. [Glossary](#14-glossary)
 
-- **Radiación**
-- **Aislamiento y confinamiento**
-- **Gravedad alterada**
-- **Ambiente cerrado y hostil** (por ejemplo, CO₂ alto)
+---
 
-El problema es que **no hay un médico al lado** y la comunicación con la Tierra puede tardar minutos o cortarse. El astronauta necesita algo que le diga **"estás bien"** o **"algo anda mal, haz esto"**, sin depender de nadie más.
+## 1. The problem
 
-El reto pide un sistema que:
-- recolecte indicadores de salud,
-- permita al astronauta **evaluar y actuar** sobre su estado (no solo ver gráficas),
-- funcione **offline y en local**,
-- incluya la **salud conductual** (mente, no solo cuerpo).
+On a long mission (for example, to Mars) the astronaut's body goes through constant changes in many places: the heart, the bones, the immune system, sleep and mood. On top of that, the main risks are:
 
-## 2. Nuestra solución
+- **Radiation**
+- **Isolation and confinement**
+- **Altered gravity**
+- **A closed, hostile environment** (for example, high CO₂)
 
-Pulsar tiene dos partes:
+The problem is that **there is no doctor nearby**, and communication with Earth can take minutes or drop entirely. The astronaut needs something that tells them **"you're fine"** or **"something is wrong, do this"**, without depending on anyone else.
 
-1. **Un dispositivo que lleva el astronauta (ESP32).** Mide sus signos vitales, decide si están bien o mal, se lo muestra en una pantalla con un **semáforo** (verde, amarillo o rojo) y una **acción recomendada**, y guarda un registro. **Funciona solo, sin red.**
-2. **Una estación de monitoreo (laptop).** Cuando hay comunicación, recibe los datos, guarda el historial, analiza tendencias de varios días, registra la salud conductual y permite que otras personas vean el estado del astronauta desde su navegador.
+The challenge asks for a system that:
+- collects health indicators,
+- lets the astronaut **assess and act** on their condition (not just look at charts),
+- works **offline and locally**,
+- includes **behavioral health** (mind, not just body).
 
-> **Idea central:** el dispositivo del astronauta **no depende** de la comunicación. La laptop es un extra, no una dependencia.
+## 2. Our solution
 
-Por ahora los signos vitales se **simulan con potenciómetros** (perillas): al girarlas fingimos un pulso de 40 o de 170 cuando queremos para el demo. Más adelante se cambian por sensores reales sin tocar el resto del sistema.
+Pulsar has two parts:
 
-## 3. Arquitectura
+1. **A device the astronaut wears outside the habitat (ESP32).** It measures their vital signs, decides whether they are fine or not, shows it on a display with a **traffic light** (green, yellow or red) and a **recommended action**, and keeps a log. **It works on its own, with no network.**
+2. **A monitoring station (laptop inside the habitat).** When there is communication, it receives the data, stores the history, analyzes multi-day trends, records behavioral health and lets other people see each astronaut's status from their browser. The astronauts inside the habitat and the ground team use **this same program**, and it handles several astronauts at once.
+
+Between them, a **comms link** (a second ESP32 acting as an access point) stands in for the real radio or satellite link that carries the data to the station.
+
+> **Core idea:** the astronaut's device **does not depend** on communication. The laptop is an extra, not a dependency.
+
+For now the vital signs are **simulated with potentiometers** (knobs): turning them lets us fake a pulse of 40 or 170 whenever we want for the demo. Later they get swapped for real sensors without touching the rest of the system.
+
+## 3. Architecture
 
 ```
-               ┌──────────── ESP32 sensor (lo lleva el astronauta) ──────────┐
-potenciómetros→│ leer → reglas + línea base → pantalla OLED (valor + semáforo)│
+               ┌──────────── ESP32 sensor (worn by the astronaut) ───────────┐
+potentiometers→│ read → rules + baseline → OLED display (value + traffic light)│
                │                 ↓                                           │
-               │        registro CSV en la memoria interna                   │
+               │        CSV log on the internal flash                        │
                └─────────────────┬───────────────────────────────────────────┘
-                                 │ WiFi (solo si hay)
-                     [ESP32 #2 = access point, "la red de la nave"]
+                                 │ WiFi (only when available)
+                     [ESP32 #2 = access point, "the comms link"]
                                  │
-  Laptop ("computadora de a bordo"):
+  Station laptop (inside the habitat):
      Mosquitto (Docker) → ingestor.py → SQLite → Streamlit (dashboard)
                                                       ↑
-                                 otras PCs lo ven desde el navegador
+                     astronauts in the habitat and the ground team, from a browser
 ```
 
-### Quién hace qué
+Each sensor publishes under its own ID (`pulsar/<astronaut_id>/...`), so several astronauts can share the same comms link and station.
 
-| Pieza | En la vida real sería… | Su trabajo |
+### Who does what
+
+| Piece | In real life it would be… | Its job |
 |---|---|---|
-| **ESP32 sensor** | Un wearable o monitor personal | Medir, decidir y avisar al astronauta. **Siempre funciona.** |
-| **ESP32 access point** | El router de la nave | **Solo mover paquetes.** Desenchufarlo simula perder la comunicación. |
-| **Mosquitto** | El "cartero" de mensajes | Recibir mensajes y entregarlos a quien esté suscrito. |
-| **ingestor.py** | Servicio de la computadora de a bordo | Recibir los datos, guardarlos y aplicar reglas de largo plazo. |
-| **SQLite** | Base de datos de la misión | Guardar el historial. |
-| **Streamlit** | Pantallas de monitoreo | Mostrar semáforo, gráficas, acciones y el check-in de ánimo. |
+| **ESP32 sensor** | A wearable or personal monitor | Measure, decide and alert the astronaut. **Always works.** |
+| **ESP32 access point** | The radio or satellite link | **Only offer WiFi.** Unplugging it simulates losing communication. |
+| **Mosquitto** | The message "mail carrier" | Receive messages and deliver them to whoever is subscribed. |
+| **ingestor.py** | A station service | Receive the data, store it and apply long-term rules. |
+| **SQLite** | The mission database | Store the history. |
+| **Streamlit** | Monitoring screens | Show traffic lights, charts, actions and the mood check-in. |
 
-### El sistema contado en versiones
+### The system told in versions
 
-Cada pieza existe porque resuelve un problema de la anterior:
+Each piece exists because it solves a problem left by the previous one:
 
-1. **Medir:** un potenciómetro + ESP32 nos da un número. *Problema: nadie lo ve.*
-2. **Mostrar y decidir en el dispositivo:** pantalla OLED + reglas. El astronauta ya sabe si está bien. *Problema: no hay historial ni nadie más lo ve.*
-3. **Enviar:** por WiFi a la laptop. *Problema: ¿en qué formato? ¿y si varios programas quieren los datos?*
-4. **Un cartero (MQTT):** el ESP32 **publica** en un "buzón" y cualquier programa **suscrito** recibe una copia. *Problema: los mensajes se pierden.*
-5. **Guardar:** un programa de Python guarda todo en SQLite. *Problema: un número solo no dice si está bien.*
-6. **Reglas:** el número se convierte en verde, amarillo o rojo + una acción.
-7. **Línea base personal:** el sistema aprende lo "normal" de cada astronauta y detecta cambios que en otra persona serían normales.
-8. **Dashboard:** Streamlit muestra todo a los monitores.
-9. **Salud conductual:** un check-in diario de ánimo, sueño y estrés.
+1. **Measure:** a potentiometer + ESP32 gives us a number. *Problem: nobody sees it.*
+2. **Show and decide on the device:** OLED display + rules. The astronaut now knows whether they are fine. *Problem: there is no history and nobody else sees it.*
+3. **Send:** over WiFi to the laptop. *Problem: in what format? And what if several programs want the data?*
+4. **A mail carrier (MQTT):** the ESP32 **publishes** to a "mailbox" and any **subscribed** program gets a copy. *Problem: messages get lost.*
+5. **Store:** a Python program saves everything to SQLite. *Problem: a number alone does not say whether it is fine.*
+6. **Rules:** the number becomes green, yellow or red + an action.
+7. **Personal baseline:** the system learns each astronaut's "normal" and detects changes that would be normal in someone else.
+8. **Dashboard:** Streamlit shows everything to the monitors.
+9. **Behavioral health:** a daily check-in for mood, sleep and stress.
 
-## 4. Por qué lo diseñamos así
+## 4. Why we designed it this way
 
-| Decisión | Por qué |
+| Decision | Why |
 |---|---|
-| **El ESP32 decide solo (edge computing)** | El reto pide no depender de la Tierra. Si se cae la red, el astronauta sigue viendo su estado. |
-| **Guardar en la memoria interna del ESP32 (LittleFS), no en tarjeta SD** | No tenemos lector SD. La flash interna tiene ~1.4 MB libres: unas 13 horas guardando 1 lectura por segundo, o ~5 días con 1 cada 10 segundos. Suficiente para el demo y sin hardware extra. |
-| **CSV en el ESP32, no SQLite** | SQLite en un ESP32 es posible pero pesado y fácil de romper. Un CSV es simple y se abre en Excel. |
-| **Escribir en la flash cada 30–60 s, no en cada lectura** | La memoria flash se desgasta con muchas escrituras pequeñas. Juntamos líneas en RAM y las escribimos de golpe. |
-| **Un segundo ESP32 como access point** | El WiFi del evento es malo. Además, desenchufarlo frente a los jueces es una forma muy visual de simular la pérdida de comunicación. |
-| **Mosquitto en la laptop, no en el access point** | El router solo debe mover paquetes; los servicios van en la "computadora de a bordo". En una misión real esto viviría en hardware dedicado y redundante (por ejemplo, una Raspberry Pi como *gateway*). Hoy la laptop hace de servidor y de pantalla a la vez. |
-| **Streamlit lee SQLite, no MQTT** | Solo un programa (`ingestor.py`) escribe en la base. Así el dashboard se puede desarrollar sin el ESP32 y abrir varias pantallas no duplica datos. |
-| **Python + Streamlit (no Next.js)** | Todo en un solo lenguaje y un dashboard en horas, no en todo el día. Varias PCs pueden verlo desde el navegador. Next.js queda como mejora después del hackathon. |
-| **La reconexión WiFi no bloquea el programa** | Si el ESP32 se queda "esperando" la red, la pantalla se congela y perdemos justo lo que queremos demostrar. Reintenta cada pocos segundos sin detener lo demás. |
+| **The ESP32 decides on its own (edge computing)** | The challenge asks us not to depend on Earth. If the network goes down, the astronaut still sees their status. |
+| **Store on the ESP32's internal memory (LittleFS), not an SD card** | We have no SD reader. The internal flash has ~1.4 MB free: about 13 hours at 1 reading per second, or ~5 days at 1 every 10 seconds. Enough for the demo with no extra hardware. |
+| **CSV on the ESP32, not SQLite** | SQLite on an ESP32 is possible but heavy and easy to break. A CSV is simple and opens in Excel. |
+| **Write to flash every 30–60 s, not on every reading** | Flash memory wears out with many small writes. We collect lines in RAM and write them all at once. |
+| **A second ESP32 as the access point** | The event WiFi is bad. Also, unplugging it in front of the judges is a very visual way to simulate losing communication. |
+| **Mosquitto on the laptop, not on the access point** | The comms link should only carry data; the services belong on the station. On a real mission this would live on dedicated, redundant hardware (for example, a Raspberry Pi as a *gateway*). Today the laptop is both the server and the screen. |
+| **Streamlit reads SQLite, not MQTT** | Only one program (`ingestor.py`) writes to the database. That way the dashboard can be developed without the ESP32, and opening several screens does not duplicate data. |
+| **Python + Streamlit (not Next.js)** | Everything in one language and a dashboard in hours, not all day. Several PCs can view it from a browser. Next.js is left as an improvement after the hackathon. |
+| **WiFi reconnection does not block the program** | If the ESP32 sits "waiting" for the network, the display freezes and we lose exactly what we want to demonstrate. It retries every few seconds without stopping anything else. |
 
-## 5. Herramientas
+## 5. Tools
 
 ### Hardware
-- 2 × **ESP32** (DevKit clásico): uno sensor y uno access point
-- **Potenciómetros B10K** lineales: simulan los sensores
-- **Pantalla OLED SSD1306** 128×64 (I2C)
-- Protoboard, cables y cable USB **de datos**
+- 2 × **ESP32** (classic DevKit): one sensor and one access point
+- Linear **B10K potentiometers**: they simulate the sensors
+- **SSD1306 OLED display** 128×64 (I2C)
+- Breadboard, jumper wires and a USB **data** cable
 - Laptop (Windows)
 
+Wiring and parts list: [`astronaut/hardware/README.md`](astronaut/hardware/README.md).
+
 ### Software
-| Herramienta | Para qué |
+| Tool | What for |
 |---|---|
-| **VS Code** | Editor de todo el proyecto |
-| **PlatformIO** (extensión de VS Code) | Compilar y subir el firmware al ESP32 |
-| **Arduino framework** (C++) | Lenguaje del firmware |
-| **Docker / Docker Compose** | Correr Mosquitto sin instalarlo a mano |
-| **Mosquitto** (`eclipse-mosquitto:2`) | Broker MQTT |
-| **Python 3** | Backend y dashboard |
-| **paho-mqtt** | Que Python se conecte a MQTT |
-| **SQLite** | Base de datos (viene incluida con Python) |
-| **Streamlit** | Dashboard web |
-| **pandas** | Manejar los datos para las gráficas |
-| **MQTT Explorer** | Ver los mensajes MQTT en vivo (depuración) |
-| **Git + GitHub** | Control de versiones |
+| **VS Code** | Editor for the whole project |
+| **PlatformIO** (VS Code extension) | Build and upload the firmware to the ESP32 |
+| **Arduino framework** (C++) | Firmware language |
+| **Docker / Docker Compose** | Run Mosquitto without installing it by hand |
+| **Mosquitto** (`eclipse-mosquitto:2`) | MQTT broker |
+| **Python 3** | Backend and dashboard |
+| **paho-mqtt** | Lets Python connect to MQTT |
+| **SQLite** | Database (included with Python) |
+| **Streamlit** | Web dashboard |
+| **pandas** | Handle the data for the charts |
+| **MQTT Explorer** | Watch MQTT messages live (debugging) |
+| **Git + GitHub** | Version control |
 
-### Librerías del firmware (PlatformIO)
-- `knolleary/PubSubClient`: cliente MQTT
-- `adafruit/Adafruit SSD1306` y `adafruit/Adafruit GFX Library`: pantalla OLED
-- `LittleFS` y `Preferences`: incluidas en el core del ESP32
+### Firmware libraries (PlatformIO)
+- `knolleary/PubSubClient`: MQTT client
+- `adafruit/Adafruit SSD1306` and `adafruit/Adafruit GFX Library`: OLED display
+- `LittleFS` and `Preferences`: included in the ESP32 core
 
-## 6. Requerimientos
+## 6. Requirements
 
-### Requerimientos funcionales
-- **RF1.** El dispositivo lee pulso, SpO₂, temperatura, CO₂ y radiación (simulados).
-- **RF2.** El dispositivo clasifica cada sistema en verde, amarillo o rojo y muestra una acción recomendada en la pantalla.
-- **RF3.** El dispositivo aprende una línea base personal y avisa cuando un valor se aleja de lo normal *para esa persona*.
-- **RF4.** El dispositivo guarda un registro local aunque no haya red.
-- **RF5.** Cuando hay red, el dispositivo envía los datos por MQTT a la estación.
-- **RF6.** La estación guarda el historial en una base de datos.
-- **RF7.** El dashboard muestra el estado de cada sistema, gráficas y acciones recomendadas.
-- **RF8.** El astronauta puede registrar un check-in diario de ánimo, sueño y estrés, y el sistema genera recomendaciones a partir de él.
-- **RF9.** Varias computadoras pueden ver el dashboard al mismo tiempo.
+### Functional requirements
+- **RF1.** The device reads pulse, SpO₂, temperature, CO₂ and radiation (simulated).
+- **RF2.** The device classifies each system as green, yellow or red and shows a recommended action on the display.
+- **RF3.** The device learns a personal baseline and warns when a value drifts from what is normal *for that person*.
+- **RF4.** The device keeps a local log even with no network.
+- **RF5.** When there is a network, the device sends the data over MQTT to the station.
+- **RF6.** The station stores the history in a database.
+- **RF7.** The dashboard shows the status of each system, charts and recommended actions.
+- **RF8.** The astronaut can record a daily check-in for mood, sleep and stress, and the system generates recommendations from it.
+- **RF9.** Several computers can view the dashboard at the same time.
 
-### Requerimientos no funcionales
-- **RNF1. Autonomía:** el dispositivo funciona sin WiFi, sin laptop y sin internet.
-- **RNF2. Offline:** nada del sistema necesita internet.
-- **RNF3. No bloqueo:** perder la red nunca congela la pantalla ni detiene el registro.
-- **RNF4. Reemplazable:** cambiar un potenciómetro por un sensor real solo cambia la función de lectura.
-- **RNF5. Simple:** se puede levantar en una laptop con Docker y Python.
+### Non-functional requirements
+- **RNF1. Autonomy:** the device works without WiFi, without the laptop and without internet.
+- **RNF2. Offline:** no part of the system needs internet.
+- **RNF3. Non-blocking:** losing the network never freezes the display or stops the log.
+- **RNF4. Replaceable:** swapping a potentiometer for a real sensor only changes the reading function.
+- **RNF5. Simple:** it can be brought up on a laptop with Docker and Python.
 
-### Fuera de alcance (por ahora)
-- Sensores reales (MAX30102, MPU6050, MLX90614/DS18B20, MQ-135/SCD40)
-- Tarjeta SD
-- Varios astronautas
-- Reenvío automático de lo guardado mientras no hubo red (se hace si sobra tiempo)
+### Out of scope (for now)
+- Real sensors (MAX30102, MPU6050, MLX90614/DS18B20, MQ-135/SCD40)
+- SD card
+- More than one physical sensor device (the software already supports several astronauts; each device needs its own `ASTRONAUT_ID`)
+- Authentication and TLS on the broker (the demo uses anonymous access)
+- Automatically re-sending what was stored while there was no network (done if time allows)
 
-## 7. Estructura del repositorio
+## 7. Repository structure
+
+The repo is organized by **where each component physically runs**.
 
 ```
 pulsar/
-├── firmware/
-│   ├── sensor/                  # ESP32 del astronauta (PlatformIO)
+├── astronaut/                   # Worn by the astronaut. Works with no network.
+│   ├── sensor/                  # ESP32 firmware (PlatformIO project)
 │   │   ├── platformio.ini
 │   │   └── src/
-│   │       ├── main.cpp         # Orquesta todo con millis(), sin delay
-│   │       ├── config.h         # WiFi, MQTT, pines e intervalos
-│   │       ├── lectura.*        # Leer variables (único archivo a cambiar con sensores reales)
-│   │       ├── reglas.*         # Número → semáforo + motivo + acción
-│   │       ├── pantalla.*       # OLED: estado, acción y gráfica del pulso
-│   │       ├── registro.*       # CSV en LittleFS, escrito cada 30 s
-│   │       └── red.*            # WiFi + MQTT sin bloqueo
-│   └── access-point/            # ESP32 que hace de red de la nave (PlatformIO)
-├── backend/
-│   ├── config.py                # Broker, tópicos, ruta de la base
-│   ├── db.py                    # Tablas y funciones para guardar
-│   ├── reglas.py                # Mismas reglas que el firmware, en Python
-│   └── ingestor.py              # MQTT → SQLite (único que escribe lecturas)
-├── dashboard/
-│   └── app.py                   # Streamlit: lee SQLite, semáforo, gráficas y check-in
-├── broker/
-│   └── mosquitto.conf
-├── data/                        # Aquí se crea pulsar.db (no se sube a Git)
+│   │       ├── main.cpp         # Orchestrates everything with millis(), no delay
+│   │       ├── config.h         # ASTRONAUT_ID, WiFi, MQTT, pins and intervals
+│   │       ├── readings.*       # Read variables (the only file to change for real sensors)
+│   │       ├── rules.*          # Number → traffic light + reason + action
+│   │       ├── display.*        # OLED: status, action and pulse chart
+│   │       ├── logger.*         # CSV on LittleFS, written every 30 s
+│   │       └── network.*        # Non-blocking WiFi + MQTT
+│   └── hardware/
+│       └── README.md            # Wiring and parts list
+├── comms/                       # Simulates the radio/satellite link
+│   └── access-point/            # ESP32 firmware (PlatformIO project), WiFi only
+├── station/                     # The laptop in the habitat: one program for astronauts and ground team
+│   ├── broker/
+│   │   └── mosquitto.conf
+│   ├── backend/
+│   │   ├── config.py            # Broker, topics, database path
+│   │   ├── db.py                # Tables and save functions
+│   │   ├── rules.py             # Same rules as the firmware, in Python
+│   │   └── ingestor.py          # MQTT → SQLite (the only writer of readings)
+│   └── dashboard/
+│       └── app.py               # Streamlit: reads SQLite, traffic lights, charts and check-in
+├── data/                        # pulsar.db is created here at runtime (not committed)
 ├── docs/
-│   ├── arquitectura.md          # Resumen de arquitectura y decisiones
-│   └── reglas.md                # Umbrales: fuente de verdad
-├── docker-compose.yml
+│   ├── architecture.md          # Architecture and decisions summary
+│   └── rules.md                 # Thresholds: source of truth
+├── docker-compose.yml           # Runs Mosquitto
 ├── requirements.txt
 ├── .gitignore
 └── README.md
@@ -208,13 +221,13 @@ __pycache__/
 *.db
 ```
 
-## 8. Cómo correrlo
+## 8. How to run it
 
-> El código base de todas las partes ya existe, pero **todavía no se ha probado en el hardware**. Esta sección se actualiza conforme cada parte funcione.
+> The base code for every part already exists, but **it has not been tested on the hardware yet**. This section gets updated as each part starts working.
 >
-> Todos los comandos se corren desde la **raíz del proyecto**.
+> Every command runs from the **repo root**.
 
-### 8.1 Preparar Python (con internet, antes de conectarse al access point)
+### 8.1 Set up Python (with internet, before joining the access point)
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
@@ -227,8 +240,8 @@ streamlit
 pandas
 ```
 
-### 8.2 Levantar el broker
-`broker/mosquitto.conf`:
+### 8.2 Start the broker
+`station/broker/mosquitto.conf`:
 ```
 listener 1883 0.0.0.0
 allow_anonymous true
@@ -241,23 +254,27 @@ services:
     ports:
       - "1883:1883"
     volumes:
-      - ./broker/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./station/broker/mosquitto.conf:/mosquitto/config/mosquitto.conf
 ```
 ```powershell
 docker compose up -d
 ```
-Comprueba con **MQTT Explorer** (host `localhost`, puerto `1883`).
+Check it with **MQTT Explorer** (host `localhost`, port `1883`).
 
-### 8.3 Red de la nave (ESP32 access point)
-1. Sube el firmware de `firmware/access-point/`.
-2. Conecta la laptop a esa red WiFi.
-3. Ponle a la laptop una **IP fija**: `192.168.4.10` (máscara `255.255.255.0`, puerta de enlace `192.168.4.1`).
-4. En el **Firewall de Windows**, abre los puertos TCP **1883** (MQTT) y **8501** (Streamlit) para el perfil **Público**.
+### 8.3 Comms link (ESP32 access point)
+1. Open `comms/access-point/` as its own PlatformIO project and upload the firmware. It creates the `PULSAR-COMMS` network (password `pulsar2026`).
+2. Connect the laptop to that WiFi network.
+3. Give the laptop a **static IP**: `192.168.4.10` (mask `255.255.255.0`, gateway `192.168.4.1`).
+4. In **Windows Firewall**, open TCP ports **1883** (MQTT) and **8501** (Streamlit) for the **Public** profile.
 
-> ⚠️ Conectada al access point, la laptop **no tiene internet**. Para hacer push a GitHub cambia de red o usa cable.
+> ⚠️ While connected to the access point, the laptop **has no internet**. To push to GitHub, switch networks or use a cable.
 
 ### 8.4 ESP32 sensor
-`firmware/sensor/platformio.ini`:
+Open `astronaut/sensor/` as its own PlatformIO project (separate from `comms/access-point/`).
+
+Before uploading, set a **unique** `ASTRONAUT_ID` in `astronaut/sensor/src/config.h` (default `"astro1"`). It goes into every MQTT topic and into the MQTT client ID; two devices with the same ID would mix their data and kick each other off the broker.
+
+`astronaut/sensor/platformio.ini`:
 ```ini
 [env:esp32dev]
 platform = espressif32
@@ -270,155 +287,160 @@ lib_deps =
     adafruit/Adafruit SSD1306
     adafruit/Adafruit GFX Library
 ```
-Conexiones:
+Wiring (more detail in [`astronaut/hardware/README.md`](astronaut/hardware/README.md)):
 
-| Componente | Pin del ESP32 |
+| Component | ESP32 pin |
 |---|---|
-| Potenciómetro de pulso (pata central) | GPIO 34 |
-| Potenciómetro de SpO₂ (pata central) | GPIO 35 |
-| Potenciómetro de temperatura (pata central) | GPIO 32 |
-| Potenciómetro de CO₂ (pata central) | GPIO 33 |
-| Potenciómetro de radiación (pata central) | GPIO 36 |
-| Potenciómetros (extremos) | 3.3V y GND |
+| Pulse potentiometer (middle leg) | GPIO 34 |
+| SpO₂ potentiometer (middle leg) | GPIO 35 |
+| Temperature potentiometer (middle leg) | GPIO 32 |
+| CO₂ potentiometer (middle leg) | GPIO 33 |
+| Radiation potentiometer (middle leg) | GPIO 36 |
+| Potentiometers (outer legs) | 3.3V and GND |
 | OLED SDA / SCL | GPIO 21 / GPIO 22 |
 | OLED VCC / GND | 3.3V / GND |
 
-> Usamos solo pines ADC1 porque **ADC2 no funciona con el WiFi encendido**. GPIO 39 queda libre para otro sensor.
+> We use only ADC1 pins because **ADC2 does not work while WiFi is on**. GPIO 39 is free for another sensor.
 
-Los pines, la red WiFi, la IP del broker y los intervalos se cambian en `firmware/sensor/src/config.h`.
+The astronaut ID, pins, WiFi network, broker IP and intervals are changed in `astronaut/sensor/src/config.h`.
 
-Sube el firmware y abre el monitor serial (115200). Cada segundo imprime las lecturas, el sistema que manda en la pantalla y si hay conexión MQTT (`mqtt=si/no`).
+Upload the firmware and open the serial monitor (115200). Every second it prints the readings, the system shown on the display and whether MQTT is connected (`mqtt=yes/no`).
 
-En la pantalla se ve:
-- arriba y en grande, el **estado general** (el peor nivel de todos los sistemas);
-- debajo, la **acción recomendada**;
-- abajo, el pulso actual y una **gráfica de los últimos 100 segundos**.
+The display shows:
+- at the top, in large text, the **overall status** (the worst level across all systems);
+- below it, the **recommended action**;
+- at the bottom, the current pulse and a **chart of the last 100 seconds**.
 
-El registro local queda en `/registro.csv` dentro de la flash (columnas `ts,pulso,spo2,temp,co2,rad`, donde `ts` = segundos desde que arrancó el ESP32). Se escribe cada 30 s; si pasa de ~1 MB se borra y empieza de nuevo para no llenar la memoria.
+The local log is stored in `/log.csv` on the flash (columns `ts,pulse,spo2,temp,co2,rad`, where `ts` = seconds since the ESP32 booted). It is written every 30 s; once it passes ~1 MB it is deleted and starts again so the memory does not fill up.
 
-### 8.5 Backend y dashboard
+### 8.5 Backend and dashboard
 ```powershell
-python backend/ingestor.py
-streamlit run dashboard/app.py --server.address 0.0.0.0
+python station/backend/ingestor.py
+streamlit run station/dashboard/app.py --server.address 0.0.0.0
 ```
-- El ingestor crea `data/pulsar.db` la primera vez y reintenta solo si el broker todavía no está arriba.
-- En la laptop: `http://localhost:8501`
-- Desde otra PC en la misma red: `http://192.168.4.10:8501`
-- El dashboard se refresca cada 2 s. Si no llegan datos en 10 s, muestra un aviso de posible pérdida de comunicación.
+- The ingestor creates `data/pulsar.db` the first time and retries on its own if the broker is not up yet.
+- On the laptop: `http://localhost:8501`
+- From another PC on the same network: `http://192.168.4.10:8501`
+- Pick the astronaut in the **sidebar**. The status, the one-hour charts and the check-in form all apply to that astronaut. New astronauts appear in the list when the page reloads.
+- The dashboard refreshes every 2 s. If no data arrives for 10 s, it shows a possible-loss-of-communication warning.
 
-## 9. Contrato de datos (MQTT)
+## 9. Data contract (MQTT)
 
-Este es el "idioma" acordado entre el firmware y el backend. **Si lo cambias, avisa al equipo.**
+This is the agreed "language" between the firmware and the backend. **If you change it, tell the team.**
 
-| Tópico | Quién publica | Contenido |
+| Topic | Who publishes | Content |
 |---|---|---|
-| `pulsar/astro1/vitales` | ESP32 sensor | `{"pulso": 72, "spo2": 98, "temp": 36.6}` |
-| `pulsar/astro1/ambiente` | ESP32 sensor | `{"co2": 850, "rad": 0.8}` |
-| `pulsar/astro1/estado` | Laptop (opcional) | Estado calculado |
+| `pulsar/<astronaut_id>/vitals` | ESP32 sensor | `{"pulse": 72, "spo2": 98, "temp": 36.6}` |
+| `pulsar/<astronaut_id>/environment` | ESP32 sensor | `{"co2": 850, "rad": 0.8}` |
+| `pulsar/<astronaut_id>/status` | Station (optional) | Computed status |
 
-- 1 mensaje por segundo.
-- La hora (`ts`) la pone el ingestor al recibir el mensaje, así el ESP32 no necesita reloj.
+- `<astronaut_id>` is the sensor's `ASTRONAUT_ID`, for example `pulsar/astro1/vitals`.
+- 1 message per second per astronaut.
+- The payload has no `ts`: the ingestor sets the time when it receives the message, so the ESP32 does not need a clock.
+- The ingestor subscribes to `pulsar/+/vitals` and `pulsar/+/environment` with **QoS 1** and reads the astronaut ID from the topic. The sensor's MQTT library (PubSubClient) only publishes with QoS 0, so in practice the sensor → broker hop is QoS 0.
 
-### Base de datos (SQLite)
-| Tabla | Columnas |
+### Database (SQLite)
+| Table | Columns |
 |---|---|
-| `lecturas` | ts, astronauta, variable, valor |
-| `evaluaciones` | ts, astronauta, sistema, nivel, motivo, accion |
-| `checkins` | ts, astronauta, animo, sueno, estres, nota |
+| `readings` | ts, astronaut, variable, value |
+| `evaluations` | ts, astronaut, system, level, reason, action |
+| `checkins` | ts, astronaut, mood, sleep, stress, note |
 
-`lecturas` usa una fila por variable: si se agrega un sensor nuevo, no hay que cambiar la tabla.
+`readings` uses one row per variable: adding a new sensor does not require changing the table. The `astronaut` column comes from the topic, so every table holds every astronaut.
 
-## 10. Reglas de salud
+## 10. Health rules
 
-> ⚠️ Valores **de demostración**, no son criterios médicos.
+> ⚠️ **Demo** values, not medical criteria.
 >
-> La **fuente de verdad** es [`docs/reglas.md`](docs/reglas.md) (incluye cómo se resuelven los valores justo en el límite y los textos de cada acción). Si cambias un umbral, cámbialo también en `firmware/sensor/src/reglas.cpp` y `backend/reglas.py`.
+> The **source of truth** is [`docs/rules.md`](docs/rules.md) (it includes how values exactly on a boundary are handled and the text of each action). If you change a threshold, also change it in `astronaut/sensor/src/rules.cpp` and `station/backend/rules.py`.
 
-| Sistema | Variable | Verde | Amarillo | Rojo |
+| System | Variable | Green | Yellow | Red |
 |---|---|---|---|---|
-| Cardiovascular | Pulso (bpm) | 50–100 | 40–50 / 100–130 | <40 / >130 |
-| Respiratorio | SpO₂ (%) | ≥95 | 90–94 | <90 |
-| Térmico | Temperatura (°C) | 36–37.5 | 35.5–36 / 37.5–38.5 | <35.5 / >38.5 |
-| Ambiente | CO₂ (ppm) | <1000 | 1000–2500 | >2500 |
-| Radiación | Dosis acumulada | Comparada contra un límite diario | | |
+| Cardiovascular | Pulse (bpm) | 50–100 | 40–50 / 100–130 | <40 / >130 |
+| Respiratory | SpO₂ (%) | ≥95 | 90–94 | <90 |
+| Thermal | Temperature (°C) | 36–37.5 | 35.5–36 / 37.5–38.5 | <35.5 / >38.5 |
+| Environment | CO₂ (ppm) | <1000 | 1000–2500 | >2500 |
+| Radiation | Accumulated dose | Compared against a daily limit | | |
 
-Rangos que simula cada potenciómetro: pulso 40–180 bpm, SpO₂ 85–100 %, temperatura 35–40 °C, CO₂ 400–5000 ppm, radiación simulada.
+Range each potentiometer simulates: pulse 40–180 bpm, SpO₂ 85–100 %, temperature 35–40 °C, CO₂ 400–5000 ppm, simulated radiation.
 
-**Cada regla devuelve tres cosas:** nivel, motivo y acción. Ejemplo:
-> 🟡 *SpO₂ 91 %, debajo de tu normal (97 %).* → Revisa el sensor, reduce la actividad y verifica el soporte vital de la cabina.
+**Each rule returns three things:** level, reason and action. Example:
+> 🟡 *SpO₂ 91 %, below your normal (97 %).* → Check the sensor, reduce activity and verify the cabin's life support.
 
-**Línea base personal:** los primeros minutos el sistema calcula el promedio y la variación de cada astronauta. Si un valor se aleja mucho de *su* normal (más de 2 desviaciones), pasa a amarillo aunque esté dentro del rango general. Se guarda en la memoria NVS para no perderse si el ESP32 se reinicia.
+**Personal baseline:** during the first few minutes the system computes each astronaut's average and variation. If a value drifts far from *their* normal (more than 2 deviations), it turns yellow even if it is within the general range. It is stored in NVS memory so it is not lost if the ESP32 restarts.
 
-**Salud conductual:** check-in diario (ánimo, sueño y estrés, del 1 al 5). Ejemplo de regla:
-> 3 días seguidos con estrés alto y mal sueño → contacto con el psicólogo de la misión en la próxima ventana de comunicación + rutina de descompresión.
+**Behavioral health:** daily check-in (mood, sleep and stress, from 1 to 5). Example rule:
+> 3 days in a row with high stress and poor sleep → contact the mission psychologist in the next communication window + decompression routine.
 
-## 11. El demo
+## 11. The demo
 
-1. Todo funcionando: el OLED y el dashboard muestran los mismos datos.
-2. Giramos una perilla → el pulso sube → el OLED y el dashboard pasan a rojo con su acción.
-3. **Desenchufamos el ESP32 access point** ("se perdió la comunicación con la nave").
-4. El OLED **sigue funcionando** y el registro sigue guardándose. El astronauta no se queda sin información.
-5. Reconectamos → la laptop vuelve a recibir datos.
+1. Everything running: the OLED and the dashboard show the same data.
+2. We turn a knob → the pulse goes up → the OLED and the dashboard turn red with their action.
+3. **We unplug the ESP32 access point** ("the comms link to the station was lost").
+4. The OLED **keeps working** and the log keeps being saved. The astronaut is never left without information.
+5. We reconnect → the laptop starts receiving data again.
 
-### Siguientes pasos (para el pitch)
-- En una misión real el broker viviría en **hardware dedicado y redundante**, no en una laptop.
-- Para nave ↔ Tierra: un broker de cada lado unidos con **Mosquitto bridge**. Cada lado funciona solo y se sincronizan cuando hay enlace.
-- Sensores reales, tarjeta SD, varios astronautas e interfaz más pulida.
+### Next steps (for the pitch)
+- On a real mission the broker would live on **dedicated, redundant hardware**, not a laptop.
+- For station ↔ Earth: one broker on each side joined with a **Mosquitto bridge**. Each side works alone and they sync when there is a link.
+- Broker **authentication and TLS**, which the demo leaves out.
+- Real sensors, SD card, multiple astronauts and a more polished interface.
 
-## 12. Estado y prioridades
+## 12. Status and priorities
 
-El código base de los puntos 1 a 6 ya está escrito; se marcan cuando funcionen en el hardware. Pendientes conocidos: regla de radiación (falta definir el límite diario), línea base personal y recomendaciones a partir del check-in.
+The base code for items 1 to 6 is already written; they get checked off once they work on the hardware. Known pending items: radiation rule (the daily limit is not defined yet), personal baseline and recommendations from the check-in.
 
-En orden:
+In order:
 
-- [ ] **1.** ESP32: lectura + reglas + OLED (el núcleo autónomo)
+- [ ] **1.** ESP32: readings + rules + OLED (the autonomous core)
 - [ ] **2.** ESP32 access point
-- [ ] **3.** Envío MQTT → Mosquitto → `ingestor.py` → SQLite
-- [ ] **4.** Dashboard en Streamlit (semáforo + acciones + gráficas)
-- [ ] **5.** Check-in de salud conductual
-- [ ] **6.** Registro CSV en LittleFS
-- [ ] **7.** Línea base personal
-- [ ] **8.** *(Si sobra tiempo)* Reenviar lo guardado al reconectar
-- [ ] README final, video y presentación
+- [ ] **3.** MQTT sending → Mosquitto → `ingestor.py` → SQLite
+- [ ] **4.** Streamlit dashboard (traffic lights + actions + charts)
+- [ ] **5.** Behavioral-health check-in
+- [ ] **6.** CSV log on LittleFS
+- [ ] **7.** Personal baseline
+- [ ] **8.** *(If time allows)* Re-send stored data on reconnect
+- [ ] Final README, video and presentation
 
-### Reparto por área
-| Área | Rama | Qué incluye |
+### Work split by area
+| Area | Branch | What it includes |
 |---|---|---|
-| Firmware | `firmware` | ESP32 sensor y access point |
-| Backend | `backend` | Ingestor, reglas y SQLite |
-| Dashboard | `dashboard` | Streamlit y check-in |
-| Docs / pitch | `docs` | README, diagramas, video y presentación |
+| Firmware | `firmware` | ESP32 sensor (`astronaut/`) and access point (`comms/`) |
+| Backend | `backend` | Ingestor, rules and SQLite (`station/backend/`) |
+| Dashboard | `dashboard` | Streamlit and check-in (`station/dashboard/`) |
+| Docs / pitch | `docs` | README, diagrams, video and presentation |
 
-## 13. Cómo trabajamos con Git
+## 13. How we work with Git
 
-- Una rama por área (ver tabla de arriba). `main` siempre debe funcionar.
-- Antes de empezar: **pull**. Al terminar algo que funcione: **commit + push**.
-- Commits pequeños con mensajes claros, por ejemplo `firmware: lectura de pulso y semáforo en OLED`.
-- Si cambias el **contrato MQTT** o las **tablas**, avisa al equipo: rompe a los demás.
+- One branch per area (see the table above). `main` must always work.
+- Before starting: **pull**. When something works: **commit + push**.
+- Small commits with clear messages, for example `firmware: pulse reading and traffic light on OLED`.
+- If you change the **MQTT contract** or the **tables**, tell the team: it breaks everyone else.
 
-## 14. Glosario
+## 14. Glossary
 
-| Término | Qué significa |
+| Term | What it means |
 |---|---|
-| **ESP32** | Microcontrolador barato con WiFi. Es el "cerebro" del dispositivo. |
-| **Potenciómetro** | Perilla que cambia un voltaje. El ESP32 lo lee y lo tratamos como si fuera un signo vital. |
-| **ADC** | Convertidor analógico-digital: transforma un voltaje (0–3.3V) en un número (0–4095). |
-| **OLED** | Pantallita pequeña donde el astronauta ve su estado. |
-| **I2C / SPI** | Formas de conectar componentes al ESP32 con pocos cables. |
-| **Access point** | Dispositivo que crea una red WiFi para que otros se conecten. |
-| **MQTT** | Protocolo de mensajes ligero, muy usado en IoT. Funciona con "buzones" (tópicos). |
-| **Broker** | El "cartero" de MQTT: recibe mensajes y los entrega a quien esté suscrito. Nosotros usamos Mosquitto. |
-| **Publicar / suscribirse** | Mandar un mensaje a un tópico / pedir recibir los mensajes de un tópico. |
-| **Tópico** | El nombre del "buzón", por ejemplo `pulsar/astro1/vitales`. |
-| **Edge computing** | Procesar los datos en el dispositivo mismo, no en un servidor lejano. |
-| **Store-and-forward** | Guardar los datos cuando no hay red y enviarlos cuando vuelve. |
-| **LittleFS** | Sistema de archivos que usa la memoria interna del ESP32 como si fuera un disco pequeño. |
-| **NVS / Preferences** | Memoria del ESP32 para guardar pocos datos que no se borran al reiniciar. |
-| **Línea base** | Lo "normal" de una persona específica. |
-| **SQLite** | Base de datos que es solo un archivo; no necesita servidor. |
-| **Streamlit** | Librería de Python para hacer páginas web con gráficas rápidamente. |
-| **Docker** | Herramienta para correr programas en "contenedores" sin instalarlos directamente. |
+| **ESP32** | A cheap microcontroller with WiFi. It is the device's "brain". |
+| **Potentiometer** | A knob that changes a voltage. The ESP32 reads it and we treat it as if it were a vital sign. |
+| **ADC** | Analog-to-digital converter: turns a voltage (0–3.3V) into a number (0–4095). |
+| **OLED** | The small display where the astronaut sees their status. |
+| **I2C / SPI** | Ways to connect components to the ESP32 with few wires. |
+| **Access point** | A device that creates a WiFi network for others to join. |
+| **MQTT** | A lightweight messaging protocol widely used in IoT. It works with "mailboxes" (topics). |
+| **Broker** | MQTT's "mail carrier": it receives messages and delivers them to subscribers. We use Mosquitto. |
+| **Publish / subscribe** | Send a message to a topic / ask to receive a topic's messages. |
+| **Topic** | The name of the "mailbox", for example `pulsar/astro1/vitals`. A `+` in a subscription matches any one level, so `pulsar/+/vitals` covers every astronaut. |
+| **QoS** | MQTT "quality of service": 0 = at most once, 1 = at least once. |
+| **Edge computing** | Processing data on the device itself, not on a distant server. |
+| **Store-and-forward** | Storing data when there is no network and sending it when it comes back. |
+| **LittleFS** | A file system that uses the ESP32's internal memory like a small disk. |
+| **NVS / Preferences** | ESP32 memory for storing small amounts of data that survive a restart. |
+| **Baseline** | What is "normal" for one specific person. |
+| **SQLite** | A database that is just a file; it needs no server. |
+| **Streamlit** | A Python library for quickly building web pages with charts. |
+| **Docker** | A tool for running programs in "containers" without installing them directly. |
 
 ---
 
-Hecho por el equipo Pulsar para NASA Space Apps Challenge 2026.
+Made by the Pulsar team for the NASA Space Apps Challenge 2026.
