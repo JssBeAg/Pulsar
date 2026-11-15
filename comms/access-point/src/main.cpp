@@ -5,7 +5,7 @@
 // base station join the EVA-LINK WiFi network. This firmware only offers WiFi.
 //
 // The EVA link is not a satellite: there are no orbits or pass windows.
-// Coverage is lost for physical reasons, all modeled here:
+// Coverage depends only on physics, modeled here (there is no manual control):
 //   1. DISTANCE  — a potentiometer sets how far the astronaut is from the base.
 //                  Beyond LINK_RANGE_M the signal is gone (hard limit).
 //   2. FRINGE    — between FRINGE_START_M and LINK_RANGE_M the signal degrades
@@ -13,14 +13,13 @@
 //                  often long. `zone` (0..1) measures how deep into it we are.
 //   3. SHADOW    — craters, rocks and base structures block the signal at
 //                  random moments, for a random time (short or long).
-//   4. MANUAL    — the operator can force a drop with the button, for the demo.
 // After any drop, the radio needs a moment to re-acquire the signal before the
 // link is usable again (acquisition delay).
 //
-//   link_up = !manual_drop && !in_shadow && range_ok && acquisition_done
+//   link_up = !in_shadow && range_ok && acquisition_done
 //
 // Everything is driven by millis(); there is no delay() anywhere, so the
-// button, the distance and the shadows are always evaluated.
+// distance and the shadows are always evaluated.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_random.h>
@@ -36,9 +35,8 @@ static const int AP_CHANNEL = 1;                         // WiFi channel (1–13
 static const int AP_MAX_CLIENTS = 4;                     // Max simultaneous WiFi clients (count)
 
 // ===== Pins =====
-static const int BUTTON_PIN = 4;                         // Push button to GND (pressed = LOW)
 static const int LED_PIN = 16;                           // Link LED through 220 Ω to GND (HIGH = on)
-static const int DISTANCE_PIN = 34;                      // Distance potentiometer, ADC1, input-only pin
+static const int DISTANCE_PIN = 34;                      // Distance potentiometer wiper, ADC1, input-only pin
 
 // ===== Distance model =====
 static const float DISTANCE_SPAN_M = 3000.0f;            // Distance at full clockwise (m); 0 m fully counter-clockwise
@@ -49,7 +47,7 @@ static const int ADC_MAX = 4095;                         // 12-bit ADC full scal
 
 // ===== Fringe zone (gradual signal loss before the hard limit) =====
 static const float FRINGE_START_M = 800.0f;              // Distance where the signal starts to degrade (m)
-static const float FRINGE_FACTOR = 0.9f;                 // How much the mean shadow gap shrinks at the limit (0–1)
+static const float FRINGE_FACTOR = 0.9f;                 // How much the mean shadow interval shrinks at the limit (0–1)
 static const float FRINGE_MIN_GAP_S = 5.0f;              // Refractory period after a shadow at the limit (s)
 static const float FRINGE_LONG_BOOST = 0.4f;             // Extra long-shadow probability at the limit (0–1)
 
@@ -67,19 +65,12 @@ static const float SHADOW_LONG_MAX_S = 45.0f;            // Long shadow: max dur
 static const unsigned long ACQUIRE_MIN_MS = 1500;        // Shortest re-acquisition time after a drop (ms)
 static const unsigned long ACQUIRE_MAX_MS = 3500;        // Longest re-acquisition time after a drop (ms)
 
-// ===== Button =====
-static const unsigned long DEBOUNCE_MS = 50;             // Input must be stable this long to count (ms)
-static const unsigned long LONG_PRESS_MS = 2000;         // Hold at least this long to return to AUTO (ms)
-
 // ===== Status output =====
 static const unsigned long STATUS_INTERVAL_MS = 5000;    // How often the status line is printed (ms)
 
 // ===== State =====
-enum Mode { MODE_AUTO, MODE_MANUAL };
-static Mode mode = MODE_AUTO;            // MANUAL once the operator has used the short press
 
 // Inputs to the link state
-static bool manualDrop = false;          // Set only by the button
 static bool inShadow = false;            // Set only by the shadow model
 static bool rangeOk = true;              // Hard limit with hysteresis
 static bool acquisitionDone = true;      // True once re-acquisition after a drop has finished
@@ -102,20 +93,14 @@ static float shadowDurationS = 0.0f;
 static bool acquiring = false;           // A re-acquisition timer is running
 static unsigned long acquireDoneAt = 0;  // Target timestamp when re-acquisition finishes (millis)
 
-// Button
-static int rawButton = HIGH;             // Last raw reading (may bounce)
-static int stableButton = HIGH;          // Debounced button state
-static unsigned long rawChangedAt = 0;   // When the raw reading last changed
-static unsigned long pressStartedAt = 0; // When the current press began
-static bool longPressHandled = false;    // A long press acts once, while still held
-
 static unsigned long lastStatusAt = 0;
 
 // ---------------------------------------------------------------------------
-// Random helpers (hardware RNG, so every boot gives a different sequence)
+// Helpers
 // ---------------------------------------------------------------------------
 
-// Uniform in (0, 1]. Never 0, so ln(u) is always finite.
+// Uniform in (0, 1], from the hardware RNG (a different sequence every boot).
+// Never 0, so it is always safe in probability tests.
 static float randomUnit() {
   return ((float)esp_random() + 1.0f) / 4294967296.0f;
 }
@@ -147,10 +132,6 @@ static float meanEffectiveS() {
 // one can begin. Near the limit, any small obstacle is enough, so it shrinks.
 static float minGapS() {
   return interpolate(SHADOW_MIN_GAP_S, FRINGE_MIN_GAP_S, zone);
-}
-
-static const char* modeName() {
-  return mode == MODE_AUTO ? "AUTO" : "MANUAL";
 }
 
 // ---------------------------------------------------------------------------
@@ -219,17 +200,13 @@ void readDistance() {
 // Shadows
 // ---------------------------------------------------------------------------
 
-// Continuous shadow model. It runs in every mode, including during a manual
-// drop: the terrain does not care about the button. That way, when the
-// operator ends a manual drop, the link reflects where the astronaut really
-// is; if they are still behind a crater, it stays down.
-//
-// Shadows arrive as a Poisson process: blockages appear at random moments
-// with no memory of the last one. Instead of sampling "time until the next
-// shadow" once, the start probability is evaluated on every tick from the
-// CURRENT zone, so moving the potentiometer changes the rate on the next
-// tick, not at the next shadow. There is no forced maximum gap: the process
-// is memoryless, and forcing a shadow would not match the physics.
+// Continuous shadow model. Shadows arrive as a Poisson process: blockages
+// appear at random moments with no memory of the last one. Instead of
+// sampling "time until the next shadow" once, the start probability is
+// evaluated on every tick from the CURRENT zone, so moving the potentiometer
+// changes the rate on the next tick, not at the next shadow. There is no
+// forced maximum gap: the process is memoryless, and forcing a shadow would
+// not match the physics.
 void updateShadows() {
   unsigned long now = millis();
 
@@ -246,7 +223,7 @@ void updateShadows() {
   if (now - lastShadowTickAt < SHADOW_TICK_MS) return;
   lastShadowTickAt += SHADOW_TICK_MS;
 
-  if (inShadow) return;                                   // One shadow at a time
+  if (inShadow) return;                                     // One shadow at a time
   if ((now - shadowEndedAt) / 1000.0f < minGapS()) return;  // Refractory period, recomputed every tick
 
   // P(at least one arrival in dt) for a Poisson process with this mean:
@@ -271,67 +248,13 @@ void updateShadows() {
 }
 
 // ---------------------------------------------------------------------------
-// Button
-// ---------------------------------------------------------------------------
-
-// INPUT_PULLUP because the button connects the pin to GND: idle = HIGH,
-// pressed = LOW, no external resistor. Contacts bounce for a few ms, so the
-// reading must be stable for DEBOUNCE_MS before it counts; otherwise one press
-// could toggle the manual drop twice.
-void handleButton() {
-  unsigned long now = millis();
-  int reading = digitalRead(BUTTON_PIN);
-
-  if (reading != rawButton) {
-    rawButton = reading;
-    rawChangedAt = now;
-  }
-
-  if (now - rawChangedAt >= DEBOUNCE_MS && reading != stableButton) {
-    stableButton = reading;
-
-    if (stableButton == LOW) {
-      // Falling edge: a press starts (counted once per press).
-      pressStartedAt = now;
-      longPressHandled = false;
-    } else if (!longPressHandled) {
-      // Released before LONG_PRESS_MS: short press toggles the manual drop.
-      // There is no timer: the operator decides how long it lasts.
-      if (mode != MODE_MANUAL) {
-        mode = MODE_MANUAL;
-        Serial.println("[mode] MANUAL");
-      }
-      manualDrop = !manualDrop;
-      Serial.println(manualDrop ? "[manual] drop START" : "[manual] drop END");
-    }
-  }
-
-  // Long press acts as soon as the hold reaches LONG_PRESS_MS, so the
-  // operator knows when to let go.
-  if (stableButton == LOW && !longPressHandled && now - pressStartedAt >= LONG_PRESS_MS) {
-    longPressHandled = true;
-    if (manualDrop) {
-      manualDrop = false;
-      Serial.println("[manual] drop END");
-    }
-    if (mode != MODE_AUTO) {
-      mode = MODE_AUTO;
-      Serial.println("[mode] AUTO");
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Link state
 // ---------------------------------------------------------------------------
 
 // Prints every cause that is currently keeping the link down.
 static void printDropCauses() {
-  char causes[128] = "";
+  char causes[96] = "";
   size_t len = 0;
-  if (manualDrop) {
-    len += snprintf(causes + len, sizeof(causes) - len, "MANUAL ");
-  }
   if (inShadow) {
     len += snprintf(causes + len, sizeof(causes) - len, "SHADOW (%s) %.0f s ",
                     shadowIsLong ? "long" : "short", shadowDurationS);
@@ -344,14 +267,14 @@ static void printDropCauses() {
 }
 
 // Combines the inputs into one link state:
-//   link_up = !manual_drop && !in_shadow && range_ok && acquisition_done
+//   link_up = !in_shadow && range_ok && acquisition_done
 // When the blocking conditions clear, the link does not come back at once:
 // a real radio needs a moment to find and lock onto the signal again, so a
 // random acquisition delay runs first (a target timestamp, not delay()).
 // The LED stays off during it.
 void updateLinkState() {
   unsigned long now = millis();
-  bool conditionsOk = !manualDrop && !inShadow && rangeOk;
+  bool conditionsOk = !inShadow && rangeOk;
 
   if (!conditionsOk) {
     // Any blocking cause cancels acquisition; the next recovery starts over.
@@ -373,8 +296,7 @@ void updateLinkState() {
   if (shouldBeUp != linkUp) {
     applyLink(shouldBeUp);
     if (shouldBeUp) {
-      Serial.printf("[link] UP (mode=%s, distance=%.0f m, zone %.0f%%)\n",
-                    modeName(), distanceM, zone * 100.0f);
+      Serial.printf("[link] UP (distance=%.0f m, zone %.0f%%)\n", distanceM, zone * 100.0f);
     } else {
       printDropCauses();
     }
@@ -385,15 +307,15 @@ void updateLinkState() {
 // LED and status
 // ---------------------------------------------------------------------------
 
-// The LED shows the physical link state only. It ignores the cause, the mode
-// and the fringe zone: a random shadow turns it off exactly like a manual
-// drop, because to the astronaut and the base both look the same — no signal.
+// The LED shows the physical link state only, and ignores the cause: a
+// shadow, the distance limit and re-acquisition all look the same to the
+// astronaut and the base — no signal.
 void updateLed() {
   digitalWrite(LED_PIN, linkUp ? HIGH : LOW);
 }
 
-// Prints mode, link state, distance, zone, mean shadow interval and (when up)
-// the client count every 5 s.
+// Prints link state, distance, zone, mean shadow interval and (when up) the
+// client count every 5 s.
 void printStatus() {
   unsigned long now = millis();
   if (now - lastStatusAt < STATUS_INTERVAL_MS) return;
@@ -401,12 +323,11 @@ void printStatus() {
 
   const char* state = linkUp ? "UP" : (acquiring ? "ACQUIRING" : "DOWN");
   if (linkUp) {
-    Serial.printf("[status] mode=%s, link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s, clients=%d\n",
-                  modeName(), state, distanceM, zone * 100.0f, meanEffectiveS(),
-                  WiFi.softAPgetStationNum());
+    Serial.printf("[status] link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s, clients=%d\n",
+                  state, distanceM, zone * 100.0f, meanEffectiveS(), WiFi.softAPgetStationNum());
   } else {
-    Serial.printf("[status] mode=%s, link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s\n",
-                  modeName(), state, distanceM, zone * 100.0f, meanEffectiveS());
+    Serial.printf("[status] link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s\n",
+                  state, distanceM, zone * 100.0f, meanEffectiveS());
   }
 }
 
@@ -414,7 +335,6 @@ void printStatus() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   analogReadResolution(12);              // 0..4095
   analogSetAttenuation(ADC_11db);        // Read close to the full 0–3.3 V range
@@ -429,7 +349,6 @@ void setup() {
 }
 
 void loop() {
-  handleButton();
   readDistance();
   updateShadows();
   updateLinkState();
