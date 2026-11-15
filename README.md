@@ -1,6 +1,6 @@
 # Pulsar 🛰️
 
-**Health monitoring for astronauts on long-duration missions that keeps working even without communication with Earth.**
+**Health monitoring for astronauts on the Moon that keeps working outside the base, even when the EVA radio link to the base station drops.**
 
 Project for the **NASA Space Apps Challenge 2026** (November 14, 2026).
 
@@ -27,14 +27,14 @@ Project for the **NASA Space Apps Challenge 2026** (November 14, 2026).
 
 ## 1. The problem
 
-On a long mission (for example, to Mars) the astronaut's body goes through constant changes in many places: the heart, the bones, the immune system, sleep and mood. On top of that, the main risks are:
+On a long mission on the Moon the astronaut's body goes through constant changes in many places: the heart, the bones, the immune system, sleep and mood. On top of that, the main risks are:
 
 - **Radiation**
 - **Isolation and confinement**
 - **Altered gravity**
 - **A closed, hostile environment** (for example, high CO₂)
 
-The problem is that **there is no doctor nearby**, and communication with Earth can take minutes or drop entirely. The astronaut needs something that tells them **"you're fine"** or **"something is wrong, do this"**, without depending on anyone else.
+The problem is that **there is no doctor nearby**. Outside the base, on extravehicular activity (EVA), the astronaut depends on a short-range radio link to the base, and that link drops whenever they walk out of range, pass behind a crater or rock, or are blocked by base structures. The astronaut needs something that tells them **"you're fine"** or **"something is wrong, do this"**, without depending on anyone else.
 
 The challenge asks for a system that:
 - collects health indicators,
@@ -44,46 +44,51 @@ The challenge asks for a system that:
 
 ## 2. Our solution
 
-Pulsar has two parts:
+Everything runs on the Moon; there is no link to Earth. Pulsar has three parts:
 
-1. **A device the astronaut wears outside the habitat (ESP32).** It measures their vital signs, decides whether they are fine or not, shows it on a display with a **traffic light** (green, yellow or red) and a **recommended action**, and keeps a log. **It works on its own, with no network.**
-2. **A monitoring station (laptop inside the habitat).** When there is communication, it receives the data, stores the history, analyzes multi-day trends, records behavioral health and lets other people see each astronaut's status from their browser. The astronauts inside the habitat and the ground team use **this same program**, and it handles several astronauts at once.
+1. **The astronaut's device (ESP32), worn outside the base.** It measures their vital signs, decides whether they are fine or not, shows it on a display with a **traffic light** (green, yellow or red) and a **recommended action**, and keeps a log. **It works on its own, with no network.** When it is in coverage, it also sends its data to the base.
+2. **The EVA link (a second ESP32 acting as the `EVA-LINK` access point).** It simulates the short-range extravehicular radio link that carries the data to the base. It only offers WiFi. Its coverage drops with distance, terrain and base structures, and that is expected.
+3. **The base station (laptop inside the lunar base).** It receives the data, stores the history, analyzes multi-day trends, records behavioral health and notices when an astronaut's link is lost. Every astronaut and every computer in the base uses **this same program** from a browser, and it handles several astronauts at once.
 
-Between them, a **comms link** (a second ESP32 acting as an access point) stands in for the real radio or satellite link that carries the data to the station.
-
-> **Core idea:** the astronaut's device **does not depend** on communication. The laptop is an extra, not a dependency.
+> **Core idea:** the astronaut's device **does not depend** on the link. Losing coverage is normal on the lunar surface; the base station is an extra, not a dependency.
 
 For now the vital signs are **simulated with potentiometers** (knobs): turning them lets us fake a pulse of 40 or 170 whenever we want for the demo. Later they get swapped for real sensors without touching the rest of the system.
 
 ## 3. Architecture
 
 ```
-               ┌──────────── ESP32 sensor (worn by the astronaut) ───────────┐
-potentiometers→│ read → rules + baseline → OLED display (value + traffic light)│
-               │                 ↓                                           │
-               │        CSV log on the internal flash                        │
-               └─────────────────┬───────────────────────────────────────────┘
-                                 │ WiFi (only when available)
-                     [ESP32 #2 = access point, "the comms link"]
-                                 │
-  Station laptop (inside the habitat):
-     Mosquitto (Docker) → ingestor.py → SQLite → Streamlit (dashboard)
-                                                      ↑
-                     astronauts in the habitat and the ground team, from a browser
+astronaut/sensor (outside, ESP32)
+  potentiometers → readings → rules → OLED (status + action)
+                        ↓
+                  log in flash (LittleFS)
+                        ↓  EVA-LINK, when in coverage
+comms/access-point (EVA-LINK, ESP32, WiFi only)
+                        ↓
+station/ (lunar base laptop)
+  Mosquitto → ingestor → SQLite → Streamlit dashboard
+                                        ↑
+            astronauts and base computers view it in a browser
 ```
 
-Each sensor publishes under its own ID (`pulsar/<astronaut_id>/...`), so several astronauts can share the same comms link and station.
+Each sensor publishes under its own ID (`pulsar/<astronaut_id>/...`), so several astronauts share the same EVA link and base station. Full detail, including the topology and the lost-link rule, is in [`docs/architecture.md`](docs/architecture.md).
+
+**Principles:**
+- **Autonomy first:** the astronaut always has local alerts, the OLED and the log, whatever the link does.
+- **Coverage loss is normal:** the EVA link drops with distance and terrain; that is an expected condition, not a failure.
+- **One shared station:** one broker, one ingestor and one dashboard serve every astronaut and every base computer.
+- **Dashboard reads, never subscribes:** only the backend talks to MQTT.
+- **Lost-link detection lives in the station:** no data from an astronaut for a configurable time (default 5 s) means their link is lost. The EVA link cannot report its own outage, because it goes silent.
 
 ### Who does what
 
-| Piece | In real life it would be… | Its job |
-|---|---|---|
-| **ESP32 sensor** | A wearable or personal monitor | Measure, decide and alert the astronaut. **Always works.** |
-| **ESP32 access point** | The radio or satellite link | **Only offer WiFi.** Unplugging it simulates losing communication. |
-| **Mosquitto** | The message "mail carrier" | Receive messages and deliver them to whoever is subscribed. |
-| **ingestor.py** | A station service | Receive the data, store it and apply long-term rules. |
-| **SQLite** | The mission database | Store the history. |
-| **Streamlit** | Monitoring screens | Show traffic lights, charts, actions and the mood check-in. |
+| Piece | Folder | In real life it would be… | Its job |
+|---|---|---|---|
+| **Astronaut sensor** (ESP32) | `astronaut/sensor/` | A wearable health monitor on the EVA suit | Measure, decide and alert the astronaut. **Always works.** Publishes over MQTT when in coverage. |
+| **EVA link** (ESP32 access point) | `comms/access-point/` | The short-range EVA radio link | **Only offer WiFi** (`EVA-LINK`). Its coverage comes and goes. |
+| **Mosquitto** | `station/broker/` | The base's message "mail carrier" | Receive the data from all astronauts and deliver it to subscribers. |
+| **ingestor.py** | `station/backend/` | A base station service | Subscribe to MQTT, store the data, apply the rules and detect lost links. |
+| **SQLite** | `data/` | The base's mission database | Store the history. |
+| **Streamlit** | `station/dashboard/` | Monitoring screens in the base | Read SQLite and show traffic lights, charts, actions and the mood check-in. |
 
 ### The system told in versions
 
@@ -96,22 +101,24 @@ Each piece exists because it solves a problem left by the previous one:
 5. **Store:** a Python program saves everything to SQLite. *Problem: a number alone does not say whether it is fine.*
 6. **Rules:** the number becomes green, yellow or red + an action.
 7. **Personal baseline:** the system learns each astronaut's "normal" and detects changes that would be normal in someone else.
-8. **Dashboard:** Streamlit shows everything to the monitors.
+8. **Dashboard:** Streamlit shows everything on the base computers.
 9. **Behavioral health:** a daily check-in for mood, sleep and stress.
 
 ## 4. Why we designed it this way
 
 | Decision | Why |
 |---|---|
-| **The ESP32 decides on its own (edge computing)** | The challenge asks us not to depend on Earth. If the network goes down, the astronaut still sees their status. |
+| **The ESP32 decides on its own (edge computing)** | The EVA link drops often outside the base. When it does, the astronaut still sees their status and the action to take. |
+| **Lost-link detection in the base station** | The EVA link goes silent when coverage drops, so it cannot report the outage. Only the receiver can notice that data stopped. |
 | **Store on the ESP32's internal memory (LittleFS), not an SD card** | We have no SD reader. The internal flash has ~1.4 MB free: about 13 hours at 1 reading per second, or ~5 days at 1 every 10 seconds. Enough for the demo with no extra hardware. |
 | **CSV on the ESP32, not SQLite** | SQLite on an ESP32 is possible but heavy and easy to break. A CSV is simple and opens in Excel. |
 | **Write to flash every 30–60 s, not on every reading** | Flash memory wears out with many small writes. We collect lines in RAM and write them all at once. |
-| **A second ESP32 as the access point** | The event WiFi is bad. Also, unplugging it in front of the judges is a very visual way to simulate losing communication. |
-| **Mosquitto on the laptop, not on the access point** | The comms link should only carry data; the services belong on the station. On a real mission this would live on dedicated, redundant hardware (for example, a Raspberry Pi as a *gateway*). Today the laptop is both the server and the screen. |
+| **A second ESP32 as the EVA link** | It models the radio link as its own piece, and the event WiFi is bad. Turning it off in front of the judges is a very visual way to show coverage loss. |
+| **Mosquitto on the laptop, not on the access point** | The EVA link should only carry data; the services belong on the base station. On a real mission this would live on dedicated, redundant hardware (for example, a Raspberry Pi as a *gateway*). Today the laptop is both the server and the screen. |
 | **Streamlit reads SQLite, not MQTT** | Only one program (`ingestor.py`) writes to the database. That way the dashboard can be developed without the ESP32, and opening several screens does not duplicate data. |
 | **Python + Streamlit (not Next.js)** | Everything in one language and a dashboard in hours, not all day. Several PCs can view it from a browser. Next.js is left as an improvement after the hackathon. |
-| **WiFi reconnection does not block the program** | If the ESP32 sits "waiting" for the network, the display freezes and we lose exactly what we want to demonstrate. It retries every few seconds without stopping anything else. |
+| **WiFi reconnection does not block the program** | If the ESP32 sits "waiting" for coverage, the display freezes exactly when the link drops. It retries every few seconds without stopping anything else. |
+| **One shared base station program** | Every astronaut and every base computer uses the same broker, ingestor and dashboard: no duplicated data and one place to look. |
 
 ## 5. Tools
 
@@ -191,9 +198,9 @@ pulsar/
 │   │       └── network.*        # Non-blocking WiFi + MQTT
 │   └── hardware/
 │       └── README.md            # Wiring and parts list
-├── comms/                       # Simulates the radio/satellite link
-│   └── access-point/            # ESP32 firmware (PlatformIO project), WiFi only
-├── station/                     # The laptop in the habitat: one program for astronauts and ground team
+├── comms/                       # The EVA link
+│   └── access-point/            # ESP32 firmware (PlatformIO project), EVA-LINK WiFi only
+├── station/                     # The base station laptop: one program for all astronauts and base computers
 │   ├── broker/
 │   │   └── mosquitto.conf
 │   ├── backend/
@@ -261,8 +268,8 @@ docker compose up -d
 ```
 Check it with **MQTT Explorer** (host `localhost`, port `1883`).
 
-### 8.3 Comms link (ESP32 access point)
-1. Open `comms/access-point/` as its own PlatformIO project and upload the firmware. It creates the `PULSAR-COMMS` network (password `pulsar2026`).
+### 8.3 EVA link (ESP32 access point)
+1. Open `comms/access-point/` as its own PlatformIO project and upload the firmware. It creates the `EVA-LINK` network (password `pulsar2026`).
 2. Connect the laptop to that WiFi network.
 3. Give the laptop a **static IP**: `192.168.4.10` (mask `255.255.255.0`, gateway `192.168.4.1`).
 4. In **Windows Firewall**, open TCP ports **1883** (MQTT) and **8501** (Streamlit) for the **Public** profile.
@@ -376,13 +383,12 @@ Range each potentiometer simulates: pulse 40–180 bpm, SpO₂ 85–100 %, tempe
 
 1. Everything running: the OLED and the dashboard show the same data.
 2. We turn a knob → the pulse goes up → the OLED and the dashboard turn red with their action.
-3. **We unplug the ESP32 access point** ("the comms link to the station was lost").
-4. The OLED **keeps working** and the log keeps being saved. The astronaut is never left without information.
-5. We reconnect → the laptop starts receiving data again.
+3. **The EVA link drops** ("the astronaut walked behind a crater"): we take the `EVA-LINK` access point down.
+4. The OLED **keeps working** and the log keeps being saved. The astronaut is never left without information, and the dashboard shows that the link was lost.
+5. Coverage returns → the base station starts receiving data again.
 
 ### Next steps (for the pitch)
 - On a real mission the broker would live on **dedicated, redundant hardware**, not a laptop.
-- For station ↔ Earth: one broker on each side joined with a **Mosquitto bridge**. Each side works alone and they sync when there is a link.
 - Broker **authentication and TLS**, which the demo leaves out.
 - Real sensors, SD card, multiple astronauts and a more polished interface.
 
@@ -427,6 +433,10 @@ In order:
 | **OLED** | The small display where the astronaut sees their status. |
 | **I2C / SPI** | Ways to connect components to the ESP32 with few wires. |
 | **Access point** | A device that creates a WiFi network for others to join. |
+| **EVA** | Extravehicular activity: work done outside the base, on the lunar surface. |
+| **EVA link** | The short-range radio link between an astronaut outside and the base. Simulated by the `EVA-LINK` access point. |
+| **Coverage** | The area where the EVA link reaches the astronaut. Distance, terrain and base structures limit it. |
+| **Base station** | The laptop inside the lunar base that runs the broker, ingestor and dashboard. |
 | **MQTT** | A lightweight messaging protocol widely used in IoT. It works with "mailboxes" (topics). |
 | **Broker** | MQTT's "mail carrier": it receives messages and delivers them to subscribers. We use Mosquitto. |
 | **Publish / subscribe** | Send a message to a topic / ask to receive a topic's messages. |

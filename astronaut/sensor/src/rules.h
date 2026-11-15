@@ -10,7 +10,7 @@ enum Level { GREEN, YELLOW, RED };
 // Result of evaluating one variable.
 struct Evaluation {
   Level level;         // Traffic light
-  const char* system;  // Body or ship system (e.g. "Cardiovascular")
+  const char* system;  // Body or environment system (e.g. "Cardiovascular")
   const char* reason;  // Why it is at that level (e.g. "Pulse high")
   const char* action;  // What the astronaut should do
 };

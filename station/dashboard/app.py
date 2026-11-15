@@ -1,6 +1,6 @@
 """Pulsar dashboard (Streamlit).
 
-One shared program for the astronauts inside the habitat and the ground team:
+One shared program for every astronaut and every computer in the lunar base:
 several browsers can open it at the same time.
 
 Reads SQLite, NEVER connects to MQTT: that way it can be developed without the
@@ -85,7 +85,7 @@ def live_section(astronaut):
         st.info(f"No evaluations for {astronaut} yet.")
         return
 
-    # Warn if data stopped arriving (for example, the comms link was unplugged).
+    # Warn if data stopped arriving (for example, the astronaut left EVA-LINK coverage).
     seconds_without_data = int(time.time()) - int(evaluations["ts"].max())
     if seconds_without_data > NO_DATA_WARNING_S:
         st.warning(f"No new data for {seconds_without_data} s. Possible loss of communication.")

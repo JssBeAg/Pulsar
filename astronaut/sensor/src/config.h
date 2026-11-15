@@ -8,12 +8,12 @@
 // Kept as a #define so network.cpp can build the topics at compile time.
 #define ASTRONAUT_ID "astro1"
 
-// ===== Comms link WiFi (created by the ESP32 access point) =====
-constexpr const char* WIFI_SSID = "PULSAR-COMMS";  // Network name
-constexpr const char* WIFI_PASS = "pulsar2026";    // Network password
+// ===== EVA link WiFi (created by the comms/access-point ESP32) =====
+constexpr const char* WIFI_SSID = "EVA-LINK";    // Network name
+constexpr const char* WIFI_PASS = "pulsar2026";  // Network password
 
-// ===== MQTT broker (Mosquitto on the station laptop) =====
-constexpr const char* MQTT_HOST = "192.168.4.10";  // Station laptop's static IP on the comms network
+// ===== MQTT broker (Mosquitto on the base station laptop) =====
+constexpr const char* MQTT_HOST = "192.168.4.10";  // Base station's static IP on the EVA-LINK network
 constexpr int MQTT_PORT = 1883;                    // Standard MQTT port
 
 // ===== Potentiometer pins (ADC1 only: ADC2 does not work while WiFi is on) =====
