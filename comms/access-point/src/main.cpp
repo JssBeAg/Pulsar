@@ -42,8 +42,8 @@ static const int LED_PIN = 16;                           // Link LED through 220
 
 // ===== Shadow model (terrain and structures) =====
 static const unsigned long SHADOW_TICK_MS = 100;         // How often the shadow model is evaluated (ms)
-static const float SHADOW_MEAN_INTERVAL_S = 180.0f;      // Mean time between shadow arrivals (s)
-static const float SHADOW_MIN_GAP_S = 60.0f;             // Refractory period after a shadow (s)
+static const float SHADOW_MEAN_INTERVAL_S = 90.0f;      // Mean time between shadow arrivals (s)
+static const float SHADOW_MIN_GAP_S = 30.0f;             // Refractory period after a shadow (s)
 static const float SHADOW_LONG_PROB = 0.2f;              // Probability that a shadow is long (0–1)
 static const float SHADOW_SHORT_MIN_S = 2.0f;            // Short shadow (rock, body turning): min duration (s)
 static const float SHADOW_SHORT_MAX_S = 8.0f;            // Short shadow: max duration (s)
