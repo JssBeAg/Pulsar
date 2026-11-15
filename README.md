@@ -201,6 +201,12 @@ pulsar/
 ├── comms/                       # The EVA link
 │   └── access-point/            # ESP32 firmware (PlatformIO project), EVA-LINK WiFi only
 ├── station/                     # The base station laptop: one program for all astronauts and base computers
+│   ├── network/                 # ESP32 firmware (PlatformIO project), PULSAR-BASE WiFi, 10.10.0.0/24, no internet
+│   │   ├── platformio.ini
+│   │   ├── src/                 # config.h, main.cpp
+│   │   ├── tools/
+│   │   │   └── test_clients.py  # Checks that two station laptops reach each other
+│   │   └── README.md
 │   ├── broker/
 │   │   └── mosquitto.conf
 │   ├── backend/

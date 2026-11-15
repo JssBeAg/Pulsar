@@ -7,8 +7,8 @@
 
 // ===== Station network (STA side) =====
 // TODO: set manually before flashing
-constexpr const char* STATION_WIFI_SSID = "TODO_STATION_SSID";          // Station network name
+constexpr const char* STATION_WIFI_SSID = "NOTE 21";          // Station network name
 // TODO: set manually before flashing
-constexpr const char* STATION_WIFI_PASSWORD = "TODO_STATION_PASSWORD";  // Station network password
+constexpr const char* STATION_WIFI_PASSWORD = "12345678900";  // Station network password
 
 constexpr unsigned long STATION_RETRY_MS = 5000;  // Time between station connection attempts (ms)

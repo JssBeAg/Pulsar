@@ -12,7 +12,7 @@ constexpr const char* WIFI_PASSWORD = "pulsar2026";   // WPA2 password of the EV
 // The laptop is on the station network, behind EVA-LINK's NAT, so this is
 // its IP on the station network, not a 192.168.4.x address.
 // TODO: set manually before flashing
-constexpr const char* STATION_HOST = "TODO_LAPTOP_IP";  // Laptop's IP on the station network
+constexpr const char* STATION_HOST = "10.44.241.206";  // Laptop's IP on the station network
 constexpr int MQTT_PORT = 1883;                       // Mosquitto port on the laptop
 constexpr const char* ASTRONAUT_ID = "astro1";        // Unique ID of this astronaut; topic pulsar/<id>/status
 constexpr int MQTT_KEEPALIVE_S = 5;                   // Broker publishes our Last Will after ~1.5x this of silence (s)

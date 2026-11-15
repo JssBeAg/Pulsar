@@ -23,7 +23,7 @@ import db  # noqa: E402
 LOST_AFTER_S = 5          # Fallback: link is LOST when the last message is older than this (s)
 REFRESH_S = 1             # Page refresh period (s)
 HISTORY_ROWS = 20         # Rows in the recent-events table
-SIM_PREFIX = "sim-"       # IDs used by fake_sensor.py
+SIM_PREFIX = "sim-"       # Rows from test IDs (old test data); labels them "simulated" only
 
 st.set_page_config(page_title="Pulsar", page_icon="🛰️", layout="wide")
 
@@ -87,7 +87,7 @@ def render() -> None:
     try:
         astronauts = db.list_astronauts(con) if _has_status_table(con) else []
         if not astronauts:
-            st.info("No status events yet. Is a sensor (or `fake_sensor.py`) publishing?")
+            st.info("No status events yet. Is the sensor publishing?")
             return
 
         now = time.time()
