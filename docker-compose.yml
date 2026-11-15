@@ -1,6 +1,6 @@
-# Pulsar MQTT broker. Start with: docker compose up -d
+# Pulsar MQTT broker. Start with: docker compose up -d broker
 services:
-  mosquitto:
+  broker:
     image: eclipse-mosquitto:2
     ports:
       - "1883:1883"

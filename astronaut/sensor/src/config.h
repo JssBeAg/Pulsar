@@ -1,32 +1,43 @@
-// config.h — Configuration constants for the ESP32 sensor.
-// Everything that can be "tuned" without touching the logic lives here.
+// config.h — Configuration for the astronaut sensor (button test step).
+// In this step the push button is the only data source: it temporarily
+// stands in for the potentiometers, which are not read yet. The current
+// screen is published to the station's MQTT broker.
 #pragma once
 
-// ===== Astronaut identity =====
-// Unique per device. It is part of every MQTT topic (pulsar/<ASTRONAUT_ID>/...)
-// and of the MQTT client ID, so each astronaut needs a different value.
-// Kept as a #define so network.cpp can build the topics at compile time.
-#define ASTRONAUT_ID "astro1"
+// ===== EVA link (WiFi access point in comms/access-point) =====
+constexpr const char* WIFI_SSID = "EVA-LINK";         // Network name of the EVA link
+constexpr const char* WIFI_PASSWORD = "pulsar2026";   // WPA2 password of the EVA link
 
-// ===== EVA link WiFi (created by the comms/access-point ESP32) =====
-constexpr const char* WIFI_SSID = "EVA-LINK";    // Network name
-constexpr const char* WIFI_PASS = "pulsar2026";  // Network password
+// ===== Station (MQTT broker on the laptop) =====
+// The laptop is on the station network, behind EVA-LINK's NAT, so this is
+// its IP on the station network, not a 192.168.4.x address.
+// TODO: set manually before flashing
+constexpr const char* STATION_HOST = "TODO_LAPTOP_IP";  // Laptop's IP on the station network
+constexpr int MQTT_PORT = 1883;                       // Mosquitto port on the laptop
+constexpr const char* ASTRONAUT_ID = "astro1";        // Unique ID of this astronaut; topic pulsar/<id>/status
+constexpr int MQTT_KEEPALIVE_S = 5;                   // Broker publishes our Last Will after ~1.5x this of silence (s)
+constexpr unsigned long HEARTBEAT_MS = 2000;          // Publish the current screen at least this often (ms)
+constexpr unsigned long MQTT_RETRY_MS = 5000;         // Time between MQTT connection attempts (ms)
+constexpr unsigned long MQTT_CONNECT_TIMEOUT_MS = 1000; // Max wait for the TCP connect to the broker (ms)
+constexpr int MQTT_SOCKET_TIMEOUT_S = 1;              // Max wait for the broker's CONNACK (s)
+// Status is published at QoS 0: PubSubClient only publishes QoS 0.
 
-// ===== MQTT broker (Mosquitto on the base station laptop) =====
-constexpr const char* MQTT_HOST = "192.168.4.10";  // Base station's static IP on the EVA-LINK network
-constexpr int MQTT_PORT = 1883;                    // Standard MQTT port
+// ===== Station acknowledgments (link dot) =====
+constexpr const char* ACK_TOPIC_FORMAT = "pulsar/%s/ack"; // Ack topic, printf format; %s = ASTRONAUT_ID
+// Two heartbeats: one missed ack keeps the dot on, two turn it off.
+// Matched to the dashboard, which marks the link LOST after LOST_AFTER_S = 5 s
+// without a message: the dot goes out at 4 s, just before the dashboard does.
+constexpr unsigned long ACK_TIMEOUT_MS = 4000;        // Dot off when no ack for this long (ms)
+constexpr unsigned long INDICATOR_REFRESH_MS = 200;   // Check the link dot at most this often (ms)
 
-// ===== Potentiometer pins (ADC1 only: ADC2 does not work while WiFi is on) =====
-constexpr int PIN_PULSE = 34;  // Simulates heart rate
-constexpr int PIN_SPO2  = 35;  // Simulates oxygen saturation
-constexpr int PIN_TEMP  = 32;  // Simulates body temperature
-constexpr int PIN_CO2   = 33;  // Simulates cabin CO2
-constexpr int PIN_RAD   = 36;  // Simulates radiation
+// ===== Button =====
+constexpr int BUTTON_PIN = 13;                        // Push button to GND (GPIO), pressed = LOW
+constexpr unsigned long DEBOUNCE_MS = 50;             // Ignore the pin this long after an accepted change (ms)
 
-// ===== OLED display (I2C) =====
-constexpr int PIN_OLED_SDA = 21;  // I2C data line
-constexpr int PIN_OLED_SCL = 22;  // I2C clock line
+// ===== Log =====
+constexpr const char* LOG_PATH = "/log.csv";          // CSV log of button presses on LittleFS (path)
+constexpr const char* PUBLISH_LOG_PATH = "/publish.csv"; // CSV log of publish attempts on LittleFS (path)
 
 // ===== Timing =====
-constexpr unsigned long SAMPLE_INTERVAL_MS = 1000;  // How often to read, evaluate, display and publish
-constexpr unsigned long FLUSH_INTERVAL_MS = 30000;  // How often the log is written to flash
+constexpr unsigned long WIFI_RETRY_MS = 5000;         // Time between WiFi connection attempts (ms)
+constexpr unsigned long STATUS_INTERVAL_MS = 5000;    // How often the status line is printed (ms)

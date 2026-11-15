@@ -1,17 +1,21 @@
-// network.h — WiFi and MQTT. The network is OPTIONAL: nothing here blocks the program.
+// network.h — Non-blocking WiFi connection to EVA-LINK. MQTT lives in mqtt.h.
+// The network is optional: nothing here ever makes the screen or the log wait.
 #pragma once
-#include "readings.h"
 
-// Starts WiFi in station mode. Does not wait for the connection.
-void initNetwork();
+// Name clash workaround: the ESP32 Arduino core 3.x has its own "Network.h",
+// which WiFi.h includes. Windows file names ignore case and src/ is searched
+// first, so the core lands on THIS file instead of its own. Pulling in the
+// core's header here, with include_next (continue the search after src/),
+// gives the core its definitions back. On a case-sensitive system the core
+// finds its own Network.h directly and this line is harmless.
+#include_next <Network.h>
 
-// Call on every loop() pass. If WiFi or MQTT was lost, it retries every
-// 5 seconds without using while or delay. It also services the MQTT client.
+// Starts WiFi in station mode and begins connecting. Returns at once.
+void startNetwork();
+
+// Call on every loop pass. Retries every WIFI_RETRY_MS while disconnected and
+// prints each change: connected (IP, RSSI) or lost.
 void maintainNetwork();
 
-// true if connected to the MQTT broker.
-bool mqttConnected();
-
-// Publishes the readings to pulsar/<ASTRONAUT_ID>/vitals and pulsar/<ASTRONAUT_ID>/environment.
-// Without a connection it does nothing (does not block). The JSON has NO ts: the ingestor adds it.
-void publishVitals(const Readings& r);
+// true while connected to EVA-LINK.
+bool networkUp();

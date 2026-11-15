@@ -1,68 +1,87 @@
-// logger.cpp — CSV log implementation on LittleFS.
+// logger.cpp — LittleFS CSV log.
 #include <Arduino.h>
 #include <LittleFS.h>
 #include "logger.h"
+#include "config.h"
 
-static const char* LOG_PATH = "/log.csv";
-static const char* CSV_HEADER = "ts,pulse,spo2,temp,co2,rad\n";
+static const char* LOG_HEADER = "ms,screen";
 
-// Maximum file size: ~1 MB.
-// The esp32dev LittleFS partition is ~1.4 MB. If the file filled the
-// partition, writes would start failing and we would stop saving exactly
-// the most recent data (what matters most). LittleFS also needs free
-// blocks to work well. So once the file passes ~1 MB it is deleted and
-// started again: we would rather lose old data than stop logging.
-static const size_t MAX_FILE_SIZE = 1024UL * 1024UL;
-
-// RAM buffer limit. At 1 line per second with a flush every 30 s it uses
-// ~1.5 KB; the limit only protects against the flash failing several times in a row.
-static const size_t MAX_BUFFER_SIZE = 8 * 1024;
-
-static String ramBuffer;
 static bool loggerReady = false;
 
 bool initLogger() {
-  // begin(true) = format if it cannot be mounted (for example, the first time).
+  // begin(true) formats the partition if it cannot be mounted. That happens
+  // on the very first boot, when the flash has never held a file system.
   loggerReady = LittleFS.begin(true);
-  ramBuffer.reserve(2048);
   if (!loggerReady) {
-    Serial.println("[logger] Could not mount LittleFS. No log will be saved.");
+    Serial.println("[logger] ERROR: could not mount LittleFS. No records will be saved.");
+    return false;
   }
-  return loggerReady;
+
+  if (!LittleFS.exists(LOG_PATH)) {
+    File file = LittleFS.open(LOG_PATH, "w");
+    if (!file) {
+      Serial.printf("[logger] ERROR: could not create %s.\n", LOG_PATH);
+      loggerReady = false;
+      return false;
+    }
+    file.println(LOG_HEADER);
+    file.close();
+    Serial.printf("[logger] Created %s\n", LOG_PATH);
+  }
+  return true;
 }
 
-void addLine(const Readings& r, unsigned long ts) {
-  if (ramBuffer.length() >= MAX_BUFFER_SIZE) {
-    return;  // Buffer full (flash is not accepting data): the line is dropped
+void logEvent(unsigned long ms, const char* screen) {
+  if (!loggerReady) {
+    Serial.printf("[logger] not ready, record NOT saved: %lu,%s\n", ms, screen);
+    return;
   }
-  char line[96];
-  snprintf(line, sizeof(line), "%lu,%.0f,%.0f,%.2f,%.0f,%.2f\n",
-           ts, r.pulse, r.spo2, r.temp, r.co2, r.rad);
-  ramBuffer += line;
+
+  // Append mode: each record is added at the end and the file is closed right
+  // away. Earlier records are never rewritten, so a power loss can at most
+  // lose the record being written, never the ones already saved.
+  File file = LittleFS.open(LOG_PATH, "a");
+  if (!file) {
+    Serial.printf("[logger] ERROR: could not open %s. Record NOT saved: %lu,%s\n", LOG_PATH, ms, screen);
+    return;
+  }
+  file.printf("%lu,%s\n", ms, screen);
+  file.close();
+  Serial.printf("[logger] saved %lu,%s\n", ms, screen);
 }
 
-void flushToFlash() {
-  if (!loggerReady || ramBuffer.length() == 0) return;
+static const char* PUBLISH_LOG_HEADER = "ms,screen,published";
 
-  // If the file is already past the maximum, delete it (see explanation above).
-  if (LittleFS.exists(LOG_PATH)) {
-    File existing = LittleFS.open(LOG_PATH, "r");
-    size_t size = existing ? existing.size() : 0;
-    if (existing) existing.close();
-    if (size > MAX_FILE_SIZE) {
-      LittleFS.remove(LOG_PATH);
-      Serial.println("[logger] File full: deleted and starting again.");
+void logPublish(unsigned long ms, const char* screen, bool published) {
+  if (!loggerReady) return;  // initLogger already reported why
+
+  // A separate file, so each CSV keeps one column layout.
+  bool isNew = !LittleFS.exists(PUBLISH_LOG_PATH);
+  File file = LittleFS.open(PUBLISH_LOG_PATH, "a");
+  if (!file) {
+    Serial.printf("[logger] ERROR: could not open %s. Record NOT saved: %lu,%s,%d\n",
+                  PUBLISH_LOG_PATH, ms, screen, published ? 1 : 0);
+    return;
+  }
+  if (isNew) file.println(PUBLISH_LOG_HEADER);
+  file.printf("%lu,%s,%d\n", ms, screen, published ? 1 : 0);
+  file.close();
+}
+
+void dumpLog() {
+  Serial.println("--- log contents ---");
+  if (!loggerReady) {
+    Serial.println("(logger not ready)");
+  } else {
+    File file = LittleFS.open(LOG_PATH, "r");
+    if (!file) {
+      Serial.printf("(could not open %s)\n", LOG_PATH);
+    } else {
+      while (file.available()) {
+        Serial.write(file.read());
+      }
+      file.close();
     }
   }
-
-  bool isNew = !LittleFS.exists(LOG_PATH);
-  File file = LittleFS.open(LOG_PATH, "a");  // "a" = append (creates it if missing)
-  if (!file) {
-    Serial.println("[logger] Could not open the file. Retrying on the next flush.");
-    return;  // The buffer is kept for the next attempt
-  }
-  if (isNew) file.print(CSV_HEADER);
-  file.print(ramBuffer);
-  file.close();
-  ramBuffer = "";
+  Serial.println("--- end ---");
 }

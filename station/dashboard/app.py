@@ -1,169 +1,117 @@
-"""Pulsar dashboard (Streamlit).
+"""Pulsar dashboard (Streamlit): HELLO/BYE state and EVA-LINK lost alert.
 
-One shared program for every astronaut and every computer in the lunar base:
-several browsers can open it at the same time.
-
-Reads SQLite, NEVER connects to MQTT: that way it can be developed without the
-ESP32, and opening several screens does not duplicate data.
+Reads SQLite only, never MQTT: the ingestor is the single subscriber, so
+any number of browsers can open this page without touching the broker.
 
 Run from the repo root:
 
-    streamlit run station/dashboard/app.py --server.address 0.0.0.0
+    streamlit run station/dashboard/app.py
 """
 
-import sqlite3
 import sys
 import time
-from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# Reuse config.py and db.py from the backend.
+# Reuse the read helpers from station/backend/db.py (no MQTT code in there).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
-import config  # noqa: E402
 import db  # noqa: E402
 
-REFRESH_INTERVAL_S = 2
-CHART_WINDOW_S = 60 * 60      # Last hour
-NO_DATA_WARNING_S = 10        # Warn if no data arrives within this time
-
-LEVEL_EMOJI = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
-SEVERITY = {"GREEN": 0, "YELLOW": 1, "RED": 2}
-SYSTEM_ORDER = ["Cardiovascular", "Respiratory", "Thermal", "Environment"]
+LOST_AFTER_S = 5          # Fallback: link is LOST when the last message is older than this (s)
+REFRESH_S = 1             # Page refresh period (s)
+HISTORY_ROWS = 20         # Rows in the recent-events table
+SIM_PREFIX = "sim-"       # IDs used by fake_sensor.py
 
 st.set_page_config(page_title="Pulsar", page_icon="🛰️", layout="wide")
-db.create_tables()  # In case the ingestor has not run yet
 
 
-def query(sql, params=()):
-    """Runs a read-only query and returns a DataFrame."""
-    with closing(sqlite3.connect(config.DB_PATH)) as con:
-        return pd.read_sql_query(sql, con, params=params)
+def link_state(latest_screen: str, age_s: float) -> str:
+    """UP or LOST. Either condition below is enough for LOST.
+
+    1. The latest row is OFFLINE: the broker published the sensor's Last Will
+       because its connection dropped. This is the reliable signal.
+    2. The latest row is older than LOST_AFTER_S: a fallback for the case
+       where the will is late or never arrives (it is only a guess).
+    """
+    if latest_screen == "OFFLINE" or age_s > LOST_AFTER_S:
+        return "LOST"
+    return "UP"
 
 
-def known_astronauts():
-    """Every astronaut ID that has sent data or recorded a check-in."""
-    df = query(
-        """SELECT astronaut FROM readings
-           UNION
-           SELECT astronaut FROM checkins
-           ORDER BY astronaut"""
-    )
-    return df["astronaut"].tolist()
+def source_of(astronaut_id: str) -> str:
+    return "simulated" if astronaut_id.startswith(SIM_PREFIX) else "sensor"
 
 
-def latest_evaluations(astronaut):
-    """Latest evaluation of each system for one astronaut."""
-    return query(
-        """SELECT ts, system, level, reason, action FROM evaluations
-           WHERE rowid IN (
-               SELECT MAX(rowid) FROM evaluations WHERE astronaut = ? GROUP BY system
-           )""",
-        (astronaut,),
-    )
-
-
-def recent_readings(astronaut, variables, since_ts):
-    placeholders = ",".join("?" for _ in variables)
-    return query(
-        f"""SELECT ts, variable, value FROM readings
-            WHERE astronaut = ? AND variable IN ({placeholders}) AND ts >= ?
-            ORDER BY ts""",
-        (astronaut, *variables, since_ts),
-    )
-
-
-def live_section(astronaut):
-    """Traffic light per system, recommended action and charts. Refreshes itself."""
-    st.title(f"🛰️ Pulsar: {astronaut}")
-
-    evaluations = latest_evaluations(astronaut)
-    if evaluations.empty:
-        st.info(f"No evaluations for {astronaut} yet.")
+def show_astronaut(con, astronaut_id: str, now: float) -> None:
+    latest = db.latest_status(con, astronaut_id)
+    if latest is None:
         return
+    age_s = now - latest["received_at"]
+    state = link_state(latest["screen"], age_s)
 
-    # Warn if data stopped arriving (for example, the astronaut left EVA-LINK coverage).
-    seconds_without_data = int(time.time()) - int(evaluations["ts"].max())
-    if seconds_without_data > NO_DATA_WARNING_S:
-        st.warning(f"No new data for {seconds_without_data} s. Possible loss of communication.")
+    if state == "LOST":
+        st.error(f"EVA-LINK lost: {astronaut_id}")
 
-    # Overall status = the most severe system
-    evaluations["severity"] = evaluations["level"].map(SEVERITY)
-    worst = evaluations.sort_values("severity", ascending=False).iloc[0]
-    st.header(f"{LEVEL_EMOJI.get(worst['level'], '⚪')} Overall status: {worst['level']}")
-    st.subheader(f"Recommended action: {worst['action']}")
-    st.caption(f"{worst['system']}: {worst['reason']}")
+    name, screen, age, link = st.columns(4)
+    name.metric("Astronaut", astronaut_id)
+    if state == "LOST":
+        # Not a live value: the last screen the sensor itself sent, in grey.
+        known = db.last_known_screen(con, astronaut_id) or "none"
+        screen.markdown(f"Screen\n\n:gray[last known: {known}]")
+    else:
+        screen.metric("Screen", latest["screen"])
+    age.metric("Since last message", f"{age_s:.0f} s")
+    link.metric("Link", state)
 
-    # Traffic light per system
-    columns = st.columns(len(SYSTEM_ORDER))
-    for column, system in zip(columns, SYSTEM_ORDER):
-        row = evaluations[evaluations["system"] == system]
-        with column:
-            if row.empty:
-                st.markdown(f"### ⚪ {system}")
-                st.write("No data")
-                continue
-            row = row.iloc[0]
-            st.markdown(f"### {LEVEL_EMOJI.get(row['level'], '⚪')} {system}")
-            st.write(row["reason"])
-            st.caption(row["action"])
 
-    # Charts for the last hour
-    readings = recent_readings(astronaut, ["pulse", "spo2"], int(time.time()) - CHART_WINDOW_S)
-    if readings.empty:
+def show_history(con, astronaut_id: str) -> None:
+    rows = db.recent_status(con, astronaut_id, HISTORY_ROWS)
+    if not rows:
         return
-    readings["time"] = pd.to_datetime(readings["ts"].map(datetime.fromtimestamp))
-    table = readings.pivot_table(index="time", columns="variable", values="value")
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**Pulse (bpm), last hour**")
-        if "pulse" in table:
-            st.line_chart(table["pulse"])
-    with right:
-        st.markdown("**SpO₂ (%), last hour**")
-        if "spo2" in table:
-            st.line_chart(table["spo2"])
+    table = pd.DataFrame(rows)
+    table["received_at"] = table["received_at"].map(lambda t: datetime.fromtimestamp(t).strftime("%H:%M:%S"))
+    table["source"] = source_of(astronaut_id)
+    st.dataframe(table[["id", "received_at", "source", "screen", "uptime_s"]], hide_index=True)
 
 
-def checkin_section(astronaut):
-    """Daily behavioral-health check-in for the selected astronaut."""
-    st.divider()
-    st.header(f"🧠 Daily check-in: {astronaut}")
-    # The form key includes the astronaut so switching astronauts starts a fresh form.
-    with st.form(f"checkin-{astronaut}", clear_on_submit=True):
-        mood = st.slider("Mood (1 = very bad, 5 = very good)", 1, 5, 3)
-        sleep = st.slider("Sleep (1 = very bad, 5 = very good)", 1, 5, 3)
-        stress = st.slider("Stress (1 = none, 5 = a lot)", 1, 5, 3)
-        note = st.text_area("Note (optional)")
-        if st.form_submit_button("Save check-in"):
-            db.save_checkin(int(time.time()), astronaut, mood, sleep, stress, note.strip())
-            st.success("Check-in saved.")
-    # TODO: recommendations from the check-ins (RF8), e.g. 3 days of high stress and poor sleep.
+def render() -> None:
+    st.title("🛰️ Pulsar: EVA-LINK status")
+
+    con = db.connect_reader()
+    if con is None:
+        st.info("No database yet. Start the ingestor: `python station/backend/ingestor.py`")
+        return
+    try:
+        astronauts = db.list_astronauts(con) if _has_status_table(con) else []
+        if not astronauts:
+            st.info("No status events yet. Is a sensor (or `fake_sensor.py`) publishing?")
+            return
+
+        now = time.time()
+        for astronaut_id in astronauts:
+            show_astronaut(con, astronaut_id, now)
+
+        st.divider()
+        selected = st.selectbox("Recent events for", astronauts, key="history_astronaut")
+        st.subheader(f"Last {HISTORY_ROWS} events: {selected}")
+        show_history(con, selected)
+    finally:
+        con.close()
 
 
-# ===== Astronaut selector (sidebar) =====
-astronauts = known_astronauts()
-st.sidebar.title("Pulsar")
-if not astronauts:
-    st.title("🛰️ Pulsar")
-    st.info("No astronauts yet. Is `python station/backend/ingestor.py` running and a sensor publishing?")
-    st.stop()
-selected = st.sidebar.selectbox("Astronaut", astronauts)
-st.sidebar.caption("New astronauts appear here when the page reloads.")
+def _has_status_table(con) -> bool:
+    row = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='status_events'").fetchone()
+    return row is not None
 
-# Auto-refresh every 2 s.
-# With st.fragment only the live part is redrawn, so the check-in form is not
-# interrupted while someone fills it in. If the Streamlit version is old and
-# has no st.fragment, the whole page reloads with sleep + rerun.
+
+# Refresh every second. st.fragment reruns only this part; older Streamlit
+# versions without it fall back to reloading the whole page.
 if hasattr(st, "fragment"):
-    st.fragment(run_every=REFRESH_INTERVAL_S)(live_section)(selected)
-    checkin_section(selected)
+    st.fragment(run_every=REFRESH_S)(render)()
 else:
-    live_section(selected)
-    checkin_section(selected)
-    time.sleep(REFRESH_INTERVAL_S)
+    render()
+    time.sleep(REFRESH_S)
     st.rerun()

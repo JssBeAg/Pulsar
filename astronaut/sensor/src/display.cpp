@@ -11,6 +11,25 @@ static const int8_t NO_RESET_PIN = -1;  // The 4-pin module has no reset line
 
 static Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, NO_RESET_PIN);
 static bool displayReady = false;
+static bool linkDotOn = false;  // Last state passed to drawLinkIndicator; showScreen redraws it
+
+// Draws the dot into the buffer only; the caller sends it with display().
+static void drawLinkDot() {
+  // Clear the corner first, so going from filled to outlined erases the inside.
+  display.fillRect(LINK_DOT_X, LINK_DOT_Y, LINK_DOT_SIZE, LINK_DOT_SIZE, SSD1306_BLACK);
+  if (linkDotOn) {
+    display.fillRect(LINK_DOT_X, LINK_DOT_Y, LINK_DOT_SIZE, LINK_DOT_SIZE, SSD1306_WHITE);
+  } else {
+    display.drawRect(LINK_DOT_X, LINK_DOT_Y, LINK_DOT_SIZE, LINK_DOT_SIZE, SSD1306_WHITE);
+  }
+}
+
+void drawLinkIndicator(bool on) {
+  linkDotOn = on;
+  if (!displayReady) return;
+  drawLinkDot();
+  display.display();
+}
 
 bool initDisplay() {
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
@@ -36,7 +55,7 @@ bool initDisplay() {
   return true;
 }
 
-void showHello() {
+void showScreen(Screen screen) {
   if (!displayReady) return;
 
   // Drawing only changes the library's buffer in RAM. Nothing reaches the
@@ -47,11 +66,13 @@ void showHello() {
 
   display.setTextSize(2);
   display.setCursor(0, 0);
-  display.print("Hello");
+  display.print(screen == SCREEN_HELLO ? "Hello" : "Bye");
 
   display.setTextSize(1);
   display.setCursor(0, 20);
   display.print("world, Pulsar");
 
+  // clearDisplay() above erased the dot; put it back in its current state.
+  drawLinkDot();
   display.display();
 }

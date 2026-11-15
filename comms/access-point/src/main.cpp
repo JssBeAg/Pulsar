@@ -1,106 +1,89 @@
 // main.cpp — ESP32 access point: the EVA link (comms/access-point).
 //
 // Simulates the short-range extravehicular (EVA) radio link that carries the
-// astronaut's data to the lunar base station. The astronaut's sensor and the
-// base station join the EVA-LINK WiFi network. This firmware only offers WiFi.
+// astronaut's data to the lunar base station. Two WiFi sides run at once
+// (WIFI_AP_STA):
 //
-// The EVA link is not a satellite: there are no orbits or pass windows.
-// Coverage depends only on physics, modeled here (there is no manual control):
-//   1. DISTANCE  — a potentiometer sets how far the astronaut is from the base.
-//                  Beyond LINK_RANGE_M the signal is gone (hard limit).
-//   2. FRINGE    — between FRINGE_START_M and LINK_RANGE_M the signal degrades
-//                  gradually: shadows become more frequent, longer and more
-//                  often long. `zone` (0..1) measures how deep into it we are.
-//   3. SHADOW    — craters, rocks and base structures block the signal at
-//                  random moments, for a random time (short or long).
-// After any drop, the radio needs a moment to re-acquire the signal before the
-// link is usable again (acquisition delay).
+//   AP  side: the EVA-LINK network the astronaut's sensors join (192.168.4.x).
+//   STA side: a client of the station network, where the laptop with the
+//             MQTT broker lives (STATION_WIFI_SSID in config.h).
 //
-//   link_up = !in_shadow && range_ok && acquisition_done
+// NAPT (NAT) on the AP interface forwards the sensors' packets out through
+// the STA interface, so a sensor reaches the laptop by its station IP.
+//
+// The only cause of link loss is a random SHADOW: craters, rocks and base
+// structures block the signal at unpredictable moments, for a short or long
+// time. A shadow takes down the AP side only: the station network stays up,
+// so the broker sees the sensor's connection drop and publishes its Last Will.
+// After a shadow, the radio needs a moment to re-acquire the signal
+// before the link is usable again (acquisition delay).
+//
+//   link_up = !in_shadow && acquisition_done
 //
 // Everything is driven by millis(); there is no delay() anywhere, so the
-// distance and the shadows are always evaluated.
+// shadow model keeps running while the link is down.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_random.h>
 #include <math.h>
+#include "config.h"
 
 // ===== Network =====
 static const char* AP_SSID = "EVA-LINK";                 // Network name the sensor and base station join
 static const char* AP_PASSWORD = "pulsar2026";           // WPA2 password (needs 8+ characters)
-static const IPAddress AP_IP(192, 168, 4, 1);            // Fixed AP address; the base station uses 192.168.4.10
+static const IPAddress AP_IP(192, 168, 4, 1);            // Fixed AP address on the EVA-LINK side
 static const IPAddress AP_GATEWAY(192, 168, 4, 1);       // The AP is its own gateway
 static const IPAddress AP_SUBNET(255, 255, 255, 0);      // /24 network
-static const int AP_CHANNEL = 1;                         // WiFi channel (1–13)
+static const int AP_CHANNEL = 1;                         // WiFi channel (1–13); once STA connects, the radio follows the station network's channel
 static const int AP_MAX_CLIENTS = 4;                     // Max simultaneous WiFi clients (count)
 
 // ===== Pins =====
 static const int LED_PIN = 16;                           // Link LED through 220 Ω to GND (HIGH = on)
-static const int DISTANCE_PIN = 34;                      // Distance potentiometer wiper, ADC1, input-only pin
-
-// ===== Distance model =====
-static const float DISTANCE_SPAN_M = 3000.0f;            // Distance at full clockwise (m); 0 m fully counter-clockwise
-static const float LINK_RANGE_M = 1200.0f;               // Hard coverage limit from the base (m)
-static const float HYSTERESIS_PCT = 10.0f;               // Must come back this far inside the limit to recover (%)
-static const int DISTANCE_SAMPLES = 16;                  // ADC samples averaged per reading (count)
-static const int ADC_MAX = 4095;                         // 12-bit ADC full scale (counts)
-
-// ===== Fringe zone (gradual signal loss before the hard limit) =====
-static const float FRINGE_START_M = 800.0f;              // Distance where the signal starts to degrade (m)
-static const float FRINGE_FACTOR = 0.9f;                 // How much the mean shadow interval shrinks at the limit (0–1)
-static const float FRINGE_MIN_GAP_S = 5.0f;              // Refractory period after a shadow at the limit (s)
-static const float FRINGE_LONG_BOOST = 0.4f;             // Extra long-shadow probability at the limit (0–1)
 
 // ===== Shadow model (terrain and structures) =====
 static const unsigned long SHADOW_TICK_MS = 100;         // How often the shadow model is evaluated (ms)
-static const float SHADOW_MEAN_INTERVAL_S = 180.0f;      // Mean time between shadow arrivals outside the fringe (s)
-static const float SHADOW_MIN_GAP_S = 60.0f;             // Refractory period after a shadow, outside the fringe (s)
-static const float SHADOW_LONG_PROB = 0.2f;              // Probability that a shadow is long, outside the fringe (0–1)
+static const float SHADOW_MEAN_INTERVAL_S = 180.0f;      // Mean time between shadow arrivals (s)
+static const float SHADOW_MIN_GAP_S = 60.0f;             // Refractory period after a shadow (s)
+static const float SHADOW_LONG_PROB = 0.2f;              // Probability that a shadow is long (0–1)
 static const float SHADOW_SHORT_MIN_S = 2.0f;            // Short shadow (rock, body turning): min duration (s)
 static const float SHADOW_SHORT_MAX_S = 8.0f;            // Short shadow: max duration (s)
 static const float SHADOW_LONG_MIN_S = 15.0f;            // Long shadow (crater, wall, ridge): min duration (s)
 static const float SHADOW_LONG_MAX_S = 45.0f;            // Long shadow: max duration (s)
 
 // ===== Radio re-acquisition =====
-static const unsigned long ACQUIRE_MIN_MS = 1500;        // Shortest re-acquisition time after a drop (ms)
-static const unsigned long ACQUIRE_MAX_MS = 3500;        // Longest re-acquisition time after a drop (ms)
+static const unsigned long ACQUIRE_MIN_MS = 1500;        // Shortest re-acquisition time after a shadow (ms)
+static const unsigned long ACQUIRE_MAX_MS = 3500;        // Longest re-acquisition time after a shadow (ms)
 
 // ===== Status output =====
 static const unsigned long STATUS_INTERVAL_MS = 5000;    // How often the status line is printed (ms)
 
 // ===== State =====
+static bool inShadow = false;              // Set only by the shadow model
+static bool acquisitionDone = true;        // True once re-acquisition after a shadow has finished
+static bool linkUp = false;                // The one variable that holds the physical link state (AP side)
 
-// Inputs to the link state
-static bool inShadow = false;            // Set only by the shadow model
-static bool rangeOk = true;              // Hard limit with hysteresis
-static bool acquisitionDone = true;      // True once re-acquisition after a drop has finished
-
-// Output: the one variable that holds the physical link state
-static bool linkUp = false;
-
-// Distance and fringe
-static float distanceM = 0.0f;           // Last averaged distance reading (m)
-static float zone = 0.0f;                // Depth into the fringe: 0 = clear signal, 1 = at the hard limit
+// Station network (STA side)
+static bool stationUp = false;                  // STA connected with an IP, at the last check
+static unsigned long lastStationAttemptAt = 0;  // When the last STA connection attempt started (millis)
+static bool naptOn = false;                     // NAPT enabled on the current AP interface
 
 // Shadows
 static unsigned long lastShadowTickAt = 0; // When the shadow model last ran a tick (millis)
 static unsigned long shadowEndedAt = 0;    // When the last shadow ended; the refractory period counts from here (millis)
 static unsigned long shadowEndsAt = 0;     // When the current shadow ends (millis)
-static bool shadowIsLong = false;
-static float shadowDurationS = 0.0f;
 
 // Acquisition
-static bool acquiring = false;           // A re-acquisition timer is running
-static unsigned long acquireDoneAt = 0;  // Target timestamp when re-acquisition finishes (millis)
+static bool acquiring = false;             // A re-acquisition timer is running
+static unsigned long acquireDoneAt = 0;    // Target timestamp when re-acquisition finishes (millis)
+static unsigned long acquireDelayMs = 0;   // Length of the current re-acquisition (ms)
 
 static unsigned long lastStatusAt = 0;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Random helpers (hardware RNG, so every boot gives a different sequence)
 // ---------------------------------------------------------------------------
 
-// Uniform in (0, 1], from the hardware RNG (a different sequence every boot).
-// Never 0, so it is always safe in probability tests.
+// Uniform in (0, 1]. Never 0, so it is always safe in probability tests.
 static float randomUnit() {
   return ((float)esp_random() + 1.0f) / 4294967296.0f;
 }
@@ -113,25 +96,6 @@ static unsigned long randomDurationMs(float minS, float maxS) {
 // Uniform integer in [minMs, maxMs].
 static unsigned long randomBetweenMs(unsigned long minMs, unsigned long maxMs) {
   return minMs + esp_random() % (maxMs - minMs + 1);
-}
-
-// Linear interpolation (named to avoid clashing with std::lerp in the core).
-static float interpolate(float from, float to, float t) {
-  return from + (to - from) * t;
-}
-
-// Mean time between shadow arrivals for the current `zone`.
-// In the fringe the link margin shrinks, so smaller obstacles are enough to
-// cut the signal: arrivals become more frequent as `zone` grows.
-static float meanEffectiveS() {
-  return SHADOW_MEAN_INTERVAL_S * (1.0f - zone * FRINGE_FACTOR);
-}
-
-// Refractory period for the current `zone`: after a shadow, the astronaut
-// needs some time to walk out of the terrain that caused it before the next
-// one can begin. Near the limit, any small obstacle is enough, so it shrinks.
-static float minGapS() {
-  return interpolate(SHADOW_MIN_GAP_S, FRINGE_MIN_GAP_S, zone);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,65 +112,70 @@ void applyLink(bool up) {
     WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
   } else {
     // Drops every client and hides the SSID, like losing the radio signal.
+    // With wifioff=true this turns off the AP side only (AP_STA -> STA): the
+    // station connection stays up during the shadow.
     WiFi.softAPdisconnect(true);
+    naptOn = false;  // The AP interface is gone; NAPT is re-enabled when it returns
   }
   linkUp = up;
 }
 
 void setupNetwork() {
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
+  // Our own timer (updateStation) is the one retry mechanism for STA.
+  WiFi.setAutoReconnect(false);
   applyLink(true);
   Serial.printf("%s ready, IP %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+
+  WiFi.begin(STATION_WIFI_SSID, STATION_WIFI_PASSWORD);  // Returns at once
+  lastStationAttemptAt = millis();
+  Serial.printf("station link: connecting to %s...\n", STATION_WIFI_SSID);
 }
 
-// ---------------------------------------------------------------------------
-// Distance and fringe zone
-// ---------------------------------------------------------------------------
+// Keeps the STA side connected to the station network. Never blocks: a
+// failed attempt is retried every STATION_RETRY_MS from the loop.
+void updateStation() {
+  unsigned long now = millis();
+  bool up = WiFi.status() == WL_CONNECTED;
 
-// How deep into the fringe the astronaut is. A real radio does not go from
-// perfect to nothing at one distance: the margin shrinks gradually, so
-// `zone` rises linearly from 0 at FRINGE_START_M to 1 at LINK_RANGE_M.
-void computeZone() {
-  zone = constrain((distanceM - FRINGE_START_M) / (LINK_RANGE_M - FRINGE_START_M), 0.0f, 1.0f);
+  if (up != stationUp) {
+    stationUp = up;
+    if (up) {
+      Serial.printf("station link: UP %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      Serial.println("station link: DOWN");
+      lastStationAttemptAt = now;  // Wait one interval before the first retry
+    }
+  }
+
+  if (!up && now - lastStationAttemptAt >= STATION_RETRY_MS) {
+    lastStationAttemptAt = now;
+    WiFi.disconnect();  // STA only: abandons a half-finished attempt, the AP is untouched
+    WiFi.begin(STATION_WIFI_SSID, STATION_WIFI_PASSWORD);
+  }
 }
 
-// Reads the potentiometer (averaged over 16 samples to remove ADC noise),
-// updates `zone`, and applies the hard limit. Hysteresis: the link drops
-// above LINK_RANGE_M but only recovers below LINK_RANGE_M × (1 − HYSTERESIS_PCT/100).
-// Without this gap a value sitting right on the limit would make the link
-// flicker on and off.
-void readDistance() {
-  long sum = 0;
-  for (int i = 0; i < DISTANCE_SAMPLES; i++) {
-    sum += analogRead(DISTANCE_PIN);
-  }
-  float raw = (float)sum / DISTANCE_SAMPLES;
-  distanceM = raw / ADC_MAX * DISTANCE_SPAN_M;
-  computeZone();
-
-  float recoverM = LINK_RANGE_M * (1.0f - HYSTERESIS_PCT / 100.0f);
-  if (rangeOk && distanceM > LINK_RANGE_M) {
-    rangeOk = false;
-    Serial.printf("[distance] OUT of range: %.0f m > %.0f m (zone %.0f%%)\n",
-                  distanceM, LINK_RANGE_M, zone * 100.0f);
-  } else if (!rangeOk && distanceM < recoverM) {
-    rangeOk = true;
-    Serial.printf("[distance] back IN range: %.0f m < %.0f m (zone %.0f%%)\n",
-                  distanceM, recoverM, zone * 100.0f);
-  }
+// NAPT on the AP interface: packets from 192.168.4.x leave through the STA
+// interface with EVA-LINK's station IP as their source. It is enabled once
+// the station is connected and the AP is up, and again every time the AP
+// comes back after a shadow (softAPdisconnect tears the AP interface down).
+// WiFi.AP.enableNAPT() is the core's wrapper around lwIP NAPT; it takes the
+// lwIP core lock, which this core's thread-safety check requires.
+void updateNapt() {
+  if (naptOn || !linkUp || !stationUp) return;
+  naptOn = WiFi.AP.enableNAPT(true);
+  Serial.println(naptOn ? "NAPT: enabled on EVA-LINK" : "NAPT: enable FAILED, retrying");
 }
 
 // ---------------------------------------------------------------------------
 // Shadows
 // ---------------------------------------------------------------------------
 
-// Continuous shadow model. Shadows arrive as a Poisson process: blockages
-// appear at random moments with no memory of the last one. Instead of
-// sampling "time until the next shadow" once, the start probability is
-// evaluated on every tick from the CURRENT zone, so moving the potentiometer
-// changes the rate on the next tick, not at the next shadow. There is no
-// forced maximum gap: the process is memoryless, and forcing a shadow would
-// not match the physics.
+// Shadows model terrain and structures blocking the signal. Where those
+// obstacles appear along the astronaut's path is unpredictable, so shadows
+// arrive as a Poisson process: random moments, with no memory of the last one.
+// The start test runs on every tick, so the decision is always current, and
+// there is no forced maximum gap: forcing a shadow would not match the physics.
 void updateShadows() {
   unsigned long now = millis();
 
@@ -214,91 +183,69 @@ void updateShadows() {
   if (inShadow && (long)(now - shadowEndsAt) >= 0) {
     inShadow = false;
     shadowEndedAt = now;
-    Serial.printf("[shadow] END %s shadow (%.1f s, zone %.0f%%)\n",
-                  shadowIsLong ? "long" : "short", shadowDurationS, zone * 100.0f);
+    Serial.println("shadow end");
   }
 
-  // Starting is evaluated at a constant tick rate, so the probability per
-  // tick matches dt. `+=` keeps the average rate exact if a loop pass runs late.
   if (now - lastShadowTickAt < SHADOW_TICK_MS) return;
-  lastShadowTickAt += SHADOW_TICK_MS;
+  // dt is the real time since the last tick, so a late loop pass still gets
+  // the right probability.
+  float dtS = (now - lastShadowTickAt) / 1000.0f;
+  lastShadowTickAt = now;
 
-  if (inShadow) return;                                     // One shadow at a time
-  if ((now - shadowEndedAt) / 1000.0f < minGapS()) return;  // Refractory period, recomputed every tick
+  if (inShadow) return;  // One shadow at a time
+  // Refractory gap: right after a shadow the astronaut is still moving away
+  // from the obstacle that caused it, so shadows cannot stack back to back.
+  if ((now - shadowEndedAt) / 1000.0f < SHADOW_MIN_GAP_S) return;
 
-  // P(at least one arrival in dt) for a Poisson process with this mean:
-  // 1 − exp(−dt / mean). expm1f is the same formula, computed without
-  // losing precision when the probability is tiny (~0.0006 at 180 s).
-  float dtS = SHADOW_TICK_MS / 1000.0f;
-  float pStart = -expm1f(-dtS / meanEffectiveS());
+  // P(at least one arrival in dt) = 1 − exp(−dt / mean). expm1f is the same
+  // formula without losing precision when the probability is tiny (~0.0006).
+  float pStart = -expm1f(-dtS / SHADOW_MEAN_INTERVAL_S);
   if (randomUnit() >= pStart) return;
 
-  // Near the limit even a ridge or a wall is enough to cut a weak signal
-  // for a long time, so long shadows become more likely with `zone`.
-  float longProb = min(1.0f, SHADOW_LONG_PROB + zone * FRINGE_LONG_BOOST);
-  shadowIsLong = randomUnit() <= longProb;
-  unsigned long durationMs = shadowIsLong
+  bool isLong = randomUnit() <= SHADOW_LONG_PROB;
+  unsigned long durationMs = isLong
       ? randomDurationMs(SHADOW_LONG_MIN_S, SHADOW_LONG_MAX_S)
       : randomDurationMs(SHADOW_SHORT_MIN_S, SHADOW_SHORT_MAX_S);
-  shadowDurationS = durationMs / 1000.0f;
   shadowEndsAt = now + durationMs;
   inShadow = true;
-  Serial.printf("[shadow] START %s shadow, %.1f s (zone %.0f%%)\n",
-                shadowIsLong ? "long" : "short", shadowDurationS, zone * 100.0f);
+  Serial.printf("shadow start: %s, %.0f s\n", isLong ? "long" : "short", durationMs / 1000.0f);
 }
 
 // ---------------------------------------------------------------------------
 // Link state
 // ---------------------------------------------------------------------------
 
-// Prints every cause that is currently keeping the link down.
-static void printDropCauses() {
-  char causes[96] = "";
-  size_t len = 0;
-  if (inShadow) {
-    len += snprintf(causes + len, sizeof(causes) - len, "SHADOW (%s) %.0f s ",
-                    shadowIsLong ? "long" : "short", shadowDurationS);
-  }
-  if (!rangeOk) {
-    len += snprintf(causes + len, sizeof(causes) - len, "DISTANCE %.0f m > %.0f m ",
-                    distanceM, LINK_RANGE_M);
-  }
-  Serial.printf("[link] DOWN, cause: %s\n", causes);
-}
-
 // Combines the inputs into one link state:
-//   link_up = !in_shadow && range_ok && acquisition_done
-// When the blocking conditions clear, the link does not come back at once:
-// a real radio needs a moment to find and lock onto the signal again, so a
-// random acquisition delay runs first (a target timestamp, not delay()).
+//   link_up = !in_shadow && acquisition_done
+// When a shadow ends, the link does not come back at once: a real radio
+// needs a moment to find and lock onto the signal again, so a random
+// acquisition delay runs first (a target timestamp, not delay()).
 // The LED stays off during it.
 void updateLinkState() {
   unsigned long now = millis();
-  bool conditionsOk = !inShadow && rangeOk;
 
-  if (!conditionsOk) {
-    // Any blocking cause cancels acquisition; the next recovery starts over.
+  if (inShadow) {
+    // A shadow cancels any re-acquisition; the next recovery starts over.
     acquisitionDone = false;
     acquiring = false;
   } else if (!acquisitionDone) {
     if (!acquiring) {
-      unsigned long delayMs = randomBetweenMs(ACQUIRE_MIN_MS, ACQUIRE_MAX_MS);
-      acquireDoneAt = now + delayMs;
+      acquireDelayMs = randomBetweenMs(ACQUIRE_MIN_MS, ACQUIRE_MAX_MS);
+      acquireDoneAt = now + acquireDelayMs;
       acquiring = true;
-      Serial.printf("[link] acquiring signal (%lu ms)...\n", delayMs);
     } else if ((long)(now - acquireDoneAt) >= 0) {
       acquiring = false;
       acquisitionDone = true;
     }
   }
 
-  bool shouldBeUp = conditionsOk && acquisitionDone;
+  bool shouldBeUp = !inShadow && acquisitionDone;
   if (shouldBeUp != linkUp) {
     applyLink(shouldBeUp);
     if (shouldBeUp) {
-      Serial.printf("[link] UP (distance=%.0f m, zone %.0f%%)\n", distanceM, zone * 100.0f);
+      Serial.printf("link: UP (acquisition %lu ms)\n", acquireDelayMs);
     } else {
-      printDropCauses();
+      Serial.println("link: DOWN");
     }
   }
 }
@@ -308,26 +255,25 @@ void updateLinkState() {
 // ---------------------------------------------------------------------------
 
 // The LED shows the physical link state only, and ignores the cause: a
-// shadow, the distance limit and re-acquisition all look the same to the
-// astronaut and the base — no signal.
+// shadow and re-acquisition look the same to the astronaut and the base —
+// no signal.
 void updateLed() {
   digitalWrite(LED_PIN, linkUp ? HIGH : LOW);
 }
 
-// Prints link state, distance, zone, mean shadow interval and (when up) the
-// client count every 5 s.
+// Prints the link state and (when up) the client count every 5 s.
 void printStatus() {
   unsigned long now = millis();
   if (now - lastStatusAt < STATUS_INTERVAL_MS) return;
   lastStatusAt = now;
 
   const char* state = linkUp ? "UP" : (acquiring ? "ACQUIRING" : "DOWN");
+  const char* station = stationUp ? "UP" : "DOWN";
   if (linkUp) {
-    Serial.printf("[status] link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s, clients=%d\n",
-                  state, distanceM, zone * 100.0f, meanEffectiveS(), WiFi.softAPgetStationNum());
+    Serial.printf("[status] link=%s, clients=%d, station=%s, napt=%s\n",
+                  state, WiFi.softAPgetStationNum(), station, naptOn ? "on" : "off");
   } else {
-    Serial.printf("[status] link=%s, distance=%.0f m, zone=%.0f%%, mean=%.0f s\n",
-                  state, distanceM, zone * 100.0f, meanEffectiveS());
+    Serial.printf("[status] link=%s, station=%s\n", state, station);
   }
 }
 
@@ -336,11 +282,8 @@ void printStatus() {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
-  analogReadResolution(12);              // 0..4095
-  analogSetAttenuation(ADC_11db);        // Read close to the full 0–3.3 V range
 
   setupNetwork();
-  readDistance();
   // Boot counts as the end of a shadow, so the refractory period also
   // applies at startup and the link is stable while things connect.
   shadowEndedAt = millis();
@@ -349,9 +292,10 @@ void setup() {
 }
 
 void loop() {
-  readDistance();
   updateShadows();
   updateLinkState();
+  updateStation();
+  updateNapt();
   updateLed();
   printStatus();
 }
