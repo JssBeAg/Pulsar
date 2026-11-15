@@ -1,18 +1,18 @@
-// display.h — SSD1306 OLED display (128x64, I2C, address 0x3C).
+// display.h — SSD1306 OLED on the astronaut sensor.
 #pragma once
-#include "readings.h"
-#include "rules.h"
 
-// Starts I2C and the display. If the display does not respond, the rest of
-// the system keeps working (it only reports it over serial).
-void initDisplay();
+// ===== Display hardware =====
+// The OLED must be powered from 3V3, not 5V: the ESP32's I2C lines are 3.3 V,
+// and many SSD1306 modules pass VCC straight to the I2C pull-ups.
+constexpr int OLED_WIDTH = 128;               // Display width (pixels)
+constexpr int OLED_HEIGHT = 64;               // Display height (pixels)
+constexpr unsigned char OLED_ADDRESS = 0x3C;  // Usual I2C address; some modules use 0x3D
+constexpr int OLED_SDA_PIN = 21;              // I2C data (GPIO)
+constexpr int OLED_SCL_PIN = 22;              // I2C clock (GPIO)
 
-// Shows the overall status (GREEN/YELLOW/RED in large text), the action
-// on one line, and the pulse chart. Also stores the pulse in the history.
-// `ev` must be the evaluation with the worst level (the one in charge).
-void showStatus(const Evaluation& ev, const Readings& r);
+// Starts I2C and the SSD1306 and clears the screen. Tries OLED_ADDRESS first,
+// then 0x3D. Returns false (and prints why) if the display does not respond.
+bool initDisplay();
 
-// Draws the line chart of the last 100 pulse values at the bottom of the
-// display. It only draws in memory: showStatus() calls it and then sends
-// everything to the display.
-void drawChart();
+// Draws "Hello" (size 2) and "world, Pulsar" (size 1).
+void showHello();
